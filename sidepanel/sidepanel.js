@@ -24,6 +24,7 @@
     traffic: function (t) { return t.host + " 这个站流量怎么起来的？"; },
     keywords: function (t) { return t.host + " 靠哪些关键词吃流量？主要落地页是哪些？"; },
     page: function (t) { return "帮我看看这个页面的 SEO 能怎么改：" + t.url; },
+    links: function (t) { return "分析一下 " + t.host + " 的外链和流量增长趋势（用插件读我的 Ahrefs）"; },
   };
 
   function need() {
@@ -272,6 +273,8 @@
   }
 
   chrome.runtime.onMessage.addListener(function (msg) {
+    if (msg && msg.type === "trends:result" && ahrefsPending && msg.requestId === ahrefsPending.id) { ahrefsDone(msg); return; }
+    if (msg && msg.type === "trends:progress" && ahrefsPending && msg.requestId === ahrefsPending.id && msg.text) { ahrefsShow(msg.text); return; }
     if (!msg || !pending || msg.requestId !== pending.id) return;
     if (msg.type === "trends:result") done(msg);
     else if (msg.type === "trends:progress" && msg.text) setStatus(msg.text);
@@ -380,25 +383,32 @@
   if (chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(followState);
   chrome.windows.getCurrent().then(function (w) { myWin = w && w.id; followState(); }, followState);
 
-  // ---------- Ahrefs：帮你在 Ahrefs 里打开这个站的 Site Explorer（用你自己登录的账号看），插件不读 Ahrefs 页面上的数据 ----------
+  // ---------- Ahrefs：在 Ahrefs 里打开这个站的 Site Explorer（用你自己登录的账号看）；允许之后 Agent 也能让插件读回数据 ----------
   // 有人用的不是官方 app.ahrefs.com，而是镜像站（比如 https://ahrefs.3ue.com）：地址在「设置」里改，存在 storage.local，
-  // 只留域名部分（贴进来的是 …/dashboard 也行），路径沿用官方的 /site-explorer/overview
-  var AHREFS_DEFAULT = "https://app.ahrefs.com";
+  // 只留域名部分（贴进来的是 …/dashboard 也行），路径沿用官方的 /site-explorer/overview。
+  // 读数据要 Chrome 的站点权限（可选权限，只针对你设置的这个地址，点「允许读 Ahrefs 数据」时 Chrome 问一次）
+  var A = self.GefeiAhrefsParse;
+  var AHREFS_DEFAULT = A.DEFAULT_BASE;
   var ahrefsBase = AHREFS_DEFAULT;
-  /** 用户填的东西 → 规整成 https://域名；不像网址返回 null */
-  function normBase(raw) {
-    var s = String(raw || "").trim();
-    if (!s) return AHREFS_DEFAULT;
-    try {
-      var u = new URL(/^https?:\/\//i.test(s) ? s : "https://" + s);
-      if (!/^https?:$/.test(u.protocol) || !/\./.test(u.hostname)) return null;
-      return u.origin;
-    } catch (e) { return null; }
-  }
+  var normBase = A.normBase;
   function showBase() {
     $("ahrefsBase").value = ahrefsBase === AHREFS_DEFAULT ? "" : ahrefsBase;
     $("openAhrefs").title = "在 " + ahrefsBase.replace(/^https?:\/\//, "") + " 打开 Site Explorer";
+    ahrefsPermState();
   }
+  function ahrefsPermState() {
+    var host = ahrefsBase.replace(/^https:\/\//, "");
+    chrome.permissions.contains({ origins: [ahrefsBase + "/*"] }).then(function (ok) {
+      $("ahrefsAllow").hidden = ok;
+      $("ahrefsAllow").textContent = "允许读 " + host + " 的数据";
+      $("ahrefsPerm").textContent = ok
+        ? "已允许读 " + host + "：Agent 要看外链 / 流量增长时，插件会用你登录的账号打开 Site Explorer、把页面上的数据读回来——只交给你自己的对话，不进网站的共享缓存。"
+        : "还没允许读 " + host + "。允许之后（Chrome 会问一次），Agent 才能用你的 Ahrefs 账号看一个站的外链和流量增长；不允许也能用上面的按钮打开 Ahrefs 自己看。";
+    }, function () {});
+  }
+  $("ahrefsAllow").addEventListener("click", function () {
+    chrome.permissions.request({ origins: [ahrefsBase + "/*"] }).then(ahrefsPermState, ahrefsPermState);
+  });
   chrome.storage.local.get("ahrefsBase").then(function (r) { ahrefsBase = normBase(r.ahrefsBase) || AHREFS_DEFAULT; showBase(); }, showBase);
   $("saveAhrefs").addEventListener("click", function () {
     var b = normBase($("ahrefsBase").value);
@@ -411,8 +421,46 @@
   });
   $("openAhrefs").addEventListener("click", function () {
     var t = need();
-    if (t) chrome.tabs.create({ url: ahrefsBase + "/site-explorer/overview?target=" + encodeURIComponent(t.host) + "&mode=subdomains" });
+    if (t) chrome.tabs.create({ url: A.siteExplorerUrl(ahrefsBase, t.host) });
   });
+
+  // 调试：不经过 Agent，让插件读一次 Ahrefs，读到什么就显示什么（曲线、指标、页面文字、原始 JSON）
+  var ahrefsPending = null;
+  function ahrefsShow(text, cls) { var e = $("ahrefsStatus"); e.hidden = false; e.textContent = text; e.className = "status" + (cls ? " " + cls : ""); }
+  $("readAhrefs").addEventListener("click", function () {
+    var t = need();
+    if (!t || ahrefsPending) return;
+    var out = $("ahrefsOut");
+    while (out.firstChild) out.removeChild(out.firstChild);
+    ahrefsPending = { id: newId(), target: t.host };
+    ahrefsPending.timer = setTimeout(function () { ahrefsDone({ requestId: ahrefsPending && ahrefsPending.id, ok: false, error: "70 秒没等到插件后台的回音" }); }, 70000);
+    ahrefsShow("正在后台打开 Ahrefs 读「" + t.host + "」……");
+    chrome.windows.getCurrent().then(function (win) {
+      return chrome.runtime.sendMessage({ type: "trends:fetch", kind: "ahrefs", requestId: ahrefsPending.id, target: t.host, windowId: win && win.id });
+    }).then(function (r) {
+      if (!r || !r.ok) ahrefsDone({ requestId: ahrefsPending && ahrefsPending.id, ok: false, error: (r && r.error) || "插件后台没接住请求" });
+    }, function (e) { ahrefsDone({ requestId: ahrefsPending && ahrefsPending.id, ok: false, error: String((e && e.message) || e) }); });
+  });
+  function ahrefsDone(res) {
+    if (!ahrefsPending || res.requestId !== ahrefsPending.id) return;
+    clearTimeout(ahrefsPending.timer);
+    ahrefsPending = null;
+    if (!res.ok) { ahrefsShow("没读到：" + (res.error || "原因不明"), "err"); return; }
+    var d = res.data || {}, series = d.series || [], metrics = d.metrics || {};
+    ahrefsShow("读到了：" + series.length + " 条曲线、" + Object.keys(metrics).length + " 个指标" + (d.text ? "、页面文字 " + d.text.length + " 字" : ""), "ok");
+    var box = el("div", "result"), dl = el("dl");
+    series.forEach(function (sr) {
+      var a = sr.points[0], b = sr.points[sr.points.length - 1];
+      row(dl, sr.name, sr.points.length + " 个点：" + fmt(a[0], false) + " " + a[1] + " → " + fmt(b[0], false) + " " + b[1]);
+    });
+    Object.keys(metrics).forEach(function (k) { row(dl, k, String(metrics[k])); });
+    box.appendChild(dl);
+    var raw = el("details");
+    raw.appendChild(el("summary", null, "原始数据（JSON）"));
+    raw.appendChild(el("pre", null, JSON.stringify(res, null, 2)));
+    box.appendChild(raw);
+    $("ahrefsOut").appendChild(box);
+  }
 
   // 版本：本地加载的插件不会自动更新，谷歌趋势的内部接口一变就会取不到数，落后了就提示去下载新版
   var mine = chrome.runtime.getManifest().version;

@@ -27,6 +27,18 @@ check("「读取标签页网址」（tabs）只作可选权限：用户在侧边
   assert.deepEqual(m.optional_permissions, ["tabs"]);
   assert.ok(!m.permissions.includes("tabs"));
 });
+check("读 Ahrefs 的站点权限是可选的（https 任意站，运行时只申请你设置的那一个 Ahrefs 地址），装的时候不多问", () => {
+  assert.deepEqual(m.optional_host_permissions, ["https://*/*"]);
+  assert.ok(!m.host_permissions.some((h) => /ahrefs/.test(h)));
+});
+check("Ahrefs 的脚本不写死在 manifest 里（允许之后由后台按设置的地址注册），但文件都在", () => {
+  assert.ok(!m.content_scripts.some((c) => c.matches.some((x) => /ahrefs/.test(x))));
+  ["content/awake.js", "content/ahrefs-hook.js", "content/ahrefs-bridge.js", "lib/ahrefs-parse.js"].forEach((f) => assert.ok(exists(f), f));
+});
+check("谷歌趋势：让后台标签页照常加载的 awake.js 排在截数据脚本前面", () => {
+  const hook = m.content_scripts.find((c) => c.js.includes("content/trends-hook.js"));
+  assert.deepEqual(hook.js, ["content/awake.js", "content/trends-hook.js"]);
+});
 check("站点权限只有两个站：谷歌趋势（看得到取数标签页的网址）、seo.web.cafe（插件更新后把传话脚本补进已打开的对话页）", () => {
   // 内容脚本的 matches 不算站点权限：只有它的话，后台读 tab.url 永远是空的，每个取数标签页都会被当成「被跳走了」；
   // 也没法往已经打开的对话页里补脚本。这两个站本来就在内容脚本里，安装时不会多出新的权限提示
@@ -53,8 +65,8 @@ check("引用到的文件都在", () => {
 });
 check("后台用 importScripts 引的文件也在", () => {
   const bg = fs.readFileSync(path.join(ROOT, "background.js"), "utf8");
-  const imported = [...bg.matchAll(/importScripts\("([^"]+)"\)/g)].map((x) => x[1]);
-  assert.ok(imported.length > 0);
+  const imported = [...bg.matchAll(/importScripts\(([^)]*)\)/g)].flatMap((x) => [...x[1].matchAll(/"([^"]+)"/g)].map((y) => y[1]));
+  assert.ok(imported.includes("lib/trends-parse.js") && imported.includes("lib/ahrefs-parse.js"), imported.join());
   assert.deepEqual(imported.filter((f) => !exists(f)), []);
 });
 check("根目录没有下划线开头的文件（Chrome 保留，会拒绝加载）", () => {

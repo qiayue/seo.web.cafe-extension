@@ -27,8 +27,12 @@
       <button type="button" data-ask="traffic">这个站流量怎么起来的？</button>
       <button type="button" data-ask="keywords">它靠哪些词吃流量？</button>
       <button type="button" data-ask="page">这个页面的 SEO 怎么改？</button>
+      <button type="button" data-ask="links">它的外链和流量是怎么涨起来的？（读你的 Ahrefs）</button>
       <button type="button" id="openAhrefs">在 Ahrefs 看外链和流量趋势 ↗</button>
+      <button type="button" id="readAhrefs">读 Ahrefs 数据给我看（调试，不经过 Agent）</button>
     </div>
+    <p id="ahrefsStatus" class="status" hidden></p>
+    <div id="ahrefsOut"></div>
     <textarea id="custom" rows="3" placeholder="也可以自己问，会带上上面这个网址"></textarea>
     <button type="button" class="primary" id="askCustom">问 Agent</button>
   </section>
@@ -62,6 +66,8 @@
     <label for="ahrefsBase">Ahrefs 地址（用镜像站就填它的域名，比如 https://ahrefs.3ue.com）</label>
     <input id="ahrefsBase" type="text" placeholder="https://app.ahrefs.com" spellcheck="false" autocomplete="off">
     <button type="button" class="small" id="saveAhrefs">保存</button> <span id="ahrefsSaved" class="hint"></span>
+    <p class="hint" id="ahrefsPerm"></p>
+    <button type="button" class="small" id="ahrefsAllow" hidden>允许读 Ahrefs 数据</button>
   </details>
 
   <footer>
@@ -70,6 +76,7 @@
     <p id="update" hidden></p>
   </footer>
   <script src="../lib/trends-parse.js"></script>
+  <script src="../lib/ahrefs-parse.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

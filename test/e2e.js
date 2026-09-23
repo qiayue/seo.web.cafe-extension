@@ -91,9 +91,27 @@ const chatPage = `<!doctype html><title>chat (mock)</title><script>
   });
   window.__cancel = function (id) { window.postMessage({ source: 'gefei-seo-page', type: 'trends:cancel', requestId: id }, location.origin); };
   window.postMessage({ source: 'gefei-seo-page', type: 'ping' }, location.origin);
+  window.__ahrefs = function (id, target) {
+    window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'ahrefs', requestId: id, target: target }, location.origin);
+  };
   window.__fetch = function (id, kw) {
     window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', requestId: id, keyword: kw, geo: '', date: 'today 12-m' }, location.origin);
   };
+</script>`;
+
+// 假的 Ahrefs（官方和镜像站同一套）：Site Explorer 页面自己去请求两个 JSON 接口（一个 fetch、一个 XHR），再把指标写进页面；
+// 接口名、字段名是编的——插件不认具体接口，只按「长相」认曲线和指标（lib/ahrefs-parse.js）
+const AH_MONTHS = Array.from({ length: 12 }, (_, i) => new Date(Date.UTC(2025, 9 + i, 1)).toISOString().slice(0, 10));
+const AH_METRICS = { metrics: { domain_rating: 76, backlinks: 1234567, refdomains: 23456, org_traffic: 2100000, org_keywords: 80000 } };
+const AH_HISTORY = { refdomains: AH_MONTHS.map((d, i) => ({ date: d, refdomains: 1000 + i * 2000 })),
+  organic: AH_MONTHS.map((d, i) => ({ date: d, org_traffic: 10000 * (i + 1) * (i + 1), org_keywords: 500 * (i + 1) })),
+  top_pages: [{ url: "/a", traffic: 5 }, { url: "/b", traffic: 3 }] };
+const ahrefsPage = `<!doctype html><title>Site Explorer (mock)</title><main id="m">Loading…</main><script>
+  var t = new URLSearchParams(location.search).get('target') || '';
+  fetch('/v4/seMetrics?target=' + t).then(function (r) { return r.json(); }).then(function (j) {
+    document.getElementById('m').innerText = 'Domain Rating\\n' + j.metrics.domain_rating + '\\nBacklinks\\n1.2M\\nRef. domains\\n23.4K\\nOrganic traffic\\n2.1M';
+  });
+  setTimeout(function () { var x = new XMLHttpRequest(); x.open('GET', '/v4/seHistory?target=' + t); x.send(); }, 300);
 </script>`;
 
 // 本机假站：按 Host 分发。证书现生成（自签，浏览器那边用 --ignore-certificate-errors 放行），不进仓库
@@ -129,7 +147,16 @@ function handle(req, res) {
     return send(404, "text/plain", "");
   }
   if (host === "www.google.com") return send(200, "text/html", "<title>unusual traffic</title>人机验证");
-  if (host === "app.ahrefs.com" || host === "ahrefs.3ue.com") return send(200, "text/html", "<title>Ahrefs (mock)</title>ahrefs");
+  if (host === "app.ahrefs.com" || host === "ahrefs.3ue.com") {
+    if (u.pathname === "/v4/seMetrics") return send(200, "application/json", JSON.stringify(AH_METRICS));
+    if (u.pathname === "/v4/seHistory") return send(200, "application/json", JSON.stringify(AH_HISTORY));
+    if (u.pathname === "/user/login") return send(200, "text/html", "<title>Sign in</title><main><form><input type=email><input type=password></form></main>");
+    if (u.pathname.startsWith("/site-explorer/overview")) {
+      if (u.searchParams.get("target") === "needlogin.com") { res.writeHead(302, { location: "/user/login" }); return res.end(); }
+      return send(200, "text/html", ahrefsPage);
+    }
+    return send(200, "text/html", "<title>Ahrefs (mock)</title>ahrefs");
+  }
   if (host === "shop.example") return send(200, "text/html", "<title>Shop " + u.pathname + "</title>shop");
   if (host === "seo.web.cafe" || host === "evil.example") {
     if (u.pathname === "/extension/version.json") return send(200, "application/json", JSON.stringify({ version: MANIFEST.version }));
@@ -310,6 +337,7 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     await panel.fill("#ahrefsBase", "https://ahrefs.3ue.com/dashboard");
     await panel.click("#saveAhrefs");
     const ahr2 = await openAhrefs();
+    check("没允许读 Ahrefs：设置里给「允许读 ahrefs.3ue.com 的数据」按钮", await panel.isVisible("#ahrefsAllow") && /允许读 ahrefs\.3ue\.com 的数据/.test(await panel.textContent("#ahrefsAllow")) && /还没允许读/.test(await panel.textContent("#ahrefsPerm")));
     check("Ahrefs 镜像站：填 …/dashboard 也只取域名，按同样的路径打开", ahr2 === "https://ahrefs.3ue.com/site-explorer/overview?target=imagedetector.com&mode=subdomains", ahr2);
     await panel.reload();
     await panel.waitForSelector("#openAhrefs");
@@ -410,6 +438,14 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     await chat.waitForTimeout(1000);
     check("后台再起来：传话脚本活着就不重复补", (await chat.evaluate(() => window.__helloCount)) === h0);
 
+    // 读 Ahrefs：没允许读这个地址（可选站点权限）→ 马上说清楚去哪里点，不开标签页
+    const IDN = "d".repeat(32);
+    await chat.evaluate((id) => window.__ahrefs(id, "pollo.ai"), IDN);
+    await chat.waitForFunction((id) => window.__results[id], IDN, { timeout: 10000 }).catch(() => {});
+    const rn = await chat.evaluate((id) => window.__results[id] || null, IDN);
+    // 前面已经把 Ahrefs 地址存成了镜像站：说的是那个地址
+    check("读 Ahrefs：还没允许读设置里的 Ahrefs 地址 → 说去侧边栏「设置」点允许", rn && rn.ok === false && /还没允许插件读 ahrefs\.3ue\.com/.test(rn.error) && /允许读 Ahrefs 数据/.test(rn.error), rn && rn.error);
+
     // 对话页请插件对比（Agent 调 google_trends 带 compare）
     const IDC = "c".repeat(32);
     await chat.evaluate((id) => window.__fetch(id, "jev,gpts,sora"), IDC);
@@ -426,6 +462,7 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     const mf = JSON.parse(fs.readFileSync(path.join(extCopy, "manifest.json"), "utf8"));
     mf.permissions.push("tabs");
     delete mf.optional_permissions;
+    mf.host_permissions.push("https://app.ahrefs.com/*", "https://ahrefs.3ue.com/*"); // 等于在侧边栏点过「允许读 Ahrefs 数据」
     fs.writeFileSync(path.join(extCopy, "manifest.json"), JSON.stringify(mf));
     const ctx2 = await playwright.chromium.launchPersistentContext(path.join(tmp, "profile2"), {
       channel: "chromium", ignoreHTTPSErrors: true,
@@ -454,6 +491,8 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       await ahr.bringToFront();
       await new Promise((r) => setTimeout(r, 800));
       check("切到对话页、Ahrefs：不跟（不把要问的网站换成它们）", (await panel2.inputValue("#pageUrl")) === "https://shop.example/b", await panel2.inputValue("#pageUrl"));
+      const own = await ahr.evaluate(() => ({ mark: window.__gefeiAgentTab, fetchNative: /native code/.test(window.fetch.toString()) }));
+      check("你自己打开的 Ahrefs 标签页：插件不截它的数据（没有记号、fetch 原样）", own.mark === undefined && own.fetchNative, JSON.stringify(own));
       await ahr.close();
       await panel2.fill("#pageUrl", "mysite.com");
       await site.goto("https://shop.example/c");
@@ -462,6 +501,44 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       check("手动填过网址：不覆盖，提示里给「换成它」", (await panel2.inputValue("#pageUrl")) === "mysite.com" && /shop\.example\/c|Shop \/c/.test(await panel2.textContent("#pageHint")));
       await panel2.click("#pageHint button");
       check("点「换成它」：换成当前网页", (await panel2.inputValue("#pageUrl")) === "https://shop.example/c");
+
+      // ⑪ 读 Ahrefs（允许过读这个地址）：用你登录的账号开 Site Explorer，截下页面自己加载的 JSON，认出曲线和指标，连同页面文字交回
+      await panel2.click("#settings summary");
+      check("侧边栏：允许过读 Ahrefs → 按钮收起、写明只交给你自己的对话", !(await panel2.isVisible("#ahrefsAllow")) && /已允许读 app\.ahrefs\.com/.test(await panel2.textContent("#ahrefsPerm")) && /不进网站的共享缓存/.test(await panel2.textContent("#ahrefsPerm")));
+      const ahTabs = () => ctx2.pages().filter((p) => /ahrefs/.test(p.url()) && p !== ahr);
+      const chat2 = await ctx2.newPage();
+      await chat2.goto("https://seo.web.cafe/chat/");
+      await chat2.waitForFunction(() => window.__hello, null, { timeout: 5000 }).catch(() => {});
+      const IDA = "a".repeat(32);
+      await chat2.evaluate((id) => window.__ahrefs(id, "https://www.Pollo.ai/pricing"), IDA);
+      await chat2.waitForFunction((id) => window.__results[id], IDA, { timeout: 40000 }).catch(() => {});
+      const ra = await chat2.evaluate((id) => window.__results[id] || null, IDA);
+      const names = ra && ra.ok ? ra.data.series.map((x) => x.name) : [];
+      check("对话页请插件读 Ahrefs：先回「收到」，读到曲线（引荐域名、自然流量、关键词）", ra && ra.ok && ra.acceptedFirst && names.includes("refdomains.refdomains") && names.includes("organic.org_traffic") && names.includes("organic.org_keywords"), ra && (ra.error || names.join()));
+      check("曲线的点：按月、日期对得上、数值原样", ra && ra.ok && ra.data.series.find((x) => x.name === "refdomains.refdomains").points.length === 12
+        && ra.data.series.find((x) => x.name === "refdomains.refdomains").points[11][1] === 23000);
+      check("指标（DR、外链、引荐域名、流量）；列表里某个页面的流量不当成站点指标", ra && ra.ok && ra.data.metrics.domain_rating === 76 && ra.data.metrics.refdomains === 23456 && ra.data.metrics.traffic === undefined, ra && JSON.stringify(ra.data.metrics));
+      check("页面上的文字也带回来（指标卡片）；网址是这个站的 Site Explorer（去掉 www、看全部子域）", ra && ra.ok && /Domain Rating\n76/.test(ra.data.text)
+        && ra.data.url === "https://app.ahrefs.com/site-explorer/overview?target=pollo.ai&mode=subdomains", ra && ra.data && ra.data.url);
+      await new Promise((r) => setTimeout(r, 500));
+      check("读完关掉 Ahrefs 标签页", ahTabs().length === 0, ahTabs().map((p) => p.url()).join());
+
+      const IDL = "b".repeat(32);
+      await chat2.evaluate((id) => window.__ahrefs(id, "needlogin.com"), IDL);
+      await chat2.waitForFunction((id) => window.__results[id], IDL, { timeout: 40000 }).catch(() => {});
+      const rl = await chat2.evaluate((id) => window.__results[id] || null, IDL);
+      const front = await sw2.evaluate(() => chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((t) => (t[0] && t[0].url) || ""));
+      check("没登录 Ahrefs：说要先登录，把登录页切到前台", rl && rl.ok === false && /先登录/.test(rl.error) && /\/user\/login/.test(front), (rl && rl.error) + " | " + front);
+      for (const p of ahTabs()) await p.close();
+
+      // 镜像站：在设置里换地址，读数据照样走（侧边栏调试按钮，不经过 Agent）
+      await panel2.fill("#ahrefsBase", "https://ahrefs.3ue.com/dashboard");
+      await panel2.click("#saveAhrefs");
+      await panel2.fill("#pageUrl", "pollo.ai");
+      await panel2.click("#readAhrefs");
+      await panel2.waitForFunction(() => /\b(ok|err)\b/.test(document.getElementById("ahrefsStatus").className), null, { timeout: 40000 }).catch(() => {});
+      const mirror = { status: await panel2.textContent("#ahrefsStatus"), raw: JSON.parse((await panel2.textContent("#ahrefsOut pre").catch(() => "{}")) || "{}") };
+      check("镜像站：在它那里打开、照样读到曲线和指标（侧边栏调试显示）", /读到了：3 条曲线/.test(mirror.status) && mirror.raw.data && /^https:\/\/ahrefs\.3ue\.com\/site-explorer\/overview\?target=pollo\.ai/.test(mirror.raw.data.url), mirror.status + " " + (mirror.raw.data && mirror.raw.data.url));
     } finally {
       await ctx2.close();
     }

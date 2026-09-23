@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "哥飞 SEO Agent",
   "short_name": "哥飞 SEO",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "配合 seo.web.cafe 的哥飞 SEO Agent：Agent 需要谷歌趋势数据时自动替你取回来；侧边栏也能直接查谷歌趋势；在任何网站上一键问 Agent。",
   "homepage_url": "https://seo.web.cafe/extension/",
   "minimum_chrome_version": "116",
@@ -24,6 +24,7 @@
   },
   "permissions": ["sidePanel", "storage", "activeTab", "scripting"],
   "optional_permissions": ["tabs"],
+  "optional_host_permissions": ["https://*/*"],
   "host_permissions": ["https://trends.google.com/*", "https://seo.web.cafe/*"],
   "background": {
     "service_worker": "background.js"
@@ -36,7 +37,7 @@
     },
     {
       "matches": ["https://trends.google.com/*"],
-      "js": ["content/trends-hook.js"],
+      "js": ["content/awake.js", "content/trends-hook.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },

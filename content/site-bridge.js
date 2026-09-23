@@ -3,7 +3,7 @@
 // 页面与这里只用 window.postMessage 说话（source 标记分清谁发的）：
 //   插件 → 页面：hello（我在，版本 x）/ trends:accepted（收到）/ trends:progress（进度）/ trends:result（取数结果）
 //                / trends:stale（我这份已经失效了，插件刚更新过——等新脚本接单）
-//   页面 → 插件：ping（在吗）/ trends:fetch（请去谷歌趋势取这个词）/ trends:cancel（用户点了停止，不取了）
+//   页面 → 插件：ping（在吗）/ trends:fetch（请去谷歌趋势取这个词；带 kind: "ahrefs" 时是读这个站的 Ahrefs）/ trends:cancel（用户点了停止，不取了）
 // 页面知道插件在，发问时才会告诉服务器「这一轮可以请插件取数」；服务器的 google_trends 工具缓存没命中时，
 // 经 SSE 把取数请求发给页面，页面转到这里，这里交给插件后台去开谷歌趋势。
 //
@@ -45,7 +45,9 @@
     if (d.type !== "trends:fetch" || !d.requestId) return;
     var fail = function (why) { post({ type: "trends:result", requestId: d.requestId, ok: false, error: why }); };
     try {
-      chrome.runtime.sendMessage({ type: "trends:fetch", requestId: d.requestId, keyword: d.keyword, geo: d.geo || "", date: d.date }, function (res) {
+      // kind: "ahrefs"（0.8.0 起）= 读这个站（target）的 Ahrefs Site Explorer；不带 = 谷歌趋势
+      chrome.runtime.sendMessage({ type: "trends:fetch", requestId: d.requestId, keyword: d.keyword, geo: d.geo || "", date: d.date,
+        kind: d.kind === "ahrefs" ? "ahrefs" : undefined, target: d.kind === "ahrefs" ? String(d.target || "") : undefined }, function (res) {
         if (chrome.runtime.lastError) {
           var m = chrome.runtime.lastError.message || "";
           if (/context invalidated/i.test(m)) { post({ type: "trends:stale", requestId: d.requestId }); return; }
