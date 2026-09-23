@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>哥飞 SEO Agent</title>
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon-32.png" alt="" width="24" height="24">
+    <h1>哥飞 SEO Agent</h1>
+  </header>
+
+  <section>
+    <h2>问问这个网站</h2>
+    <p class="hint" id="pageHint">切到想看的网页，再点一下浏览器工具栏上的插件图标，这里就会换成那个网站。</p>
+    <input id="pageUrl" type="text" placeholder="网址或域名，例如 example.com" spellcheck="false" autocomplete="off">
+    <div class="btns">
+      <button type="button" data-ask="traffic">这个站流量怎么起来的？</button>
+      <button type="button" data-ask="keywords">它靠哪些词吃流量？</button>
+      <button type="button" data-ask="page">这个页面的 SEO 怎么改？</button>
+    </div>
+    <textarea id="custom" rows="3" placeholder="也可以自己问，会带上上面这个网址"></textarea>
+    <button type="button" class="primary" id="askCustom">问 Agent</button>
+  </section>
+
+  <section>
+    <h2>查一个新词</h2>
+    <p class="hint">Agent 需要谷歌趋势数据时，会让插件在后台打开谷歌趋势取回来（取完自动关掉），取过的词全站共享。</p>
+    <input id="word" type="text" placeholder="例如 jev" spellcheck="false" autocomplete="off">
+    <button type="button" class="primary" id="askWord">问 Agent：这是新词吗？</button>
+  </section>
+
+  <footer>
+    <span id="ver"></span>
+    <a href="https://seo.web.cafe/extension/" target="_blank" rel="noopener">使用说明</a>
+    <p id="update" hidden></p>
+  </footer>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

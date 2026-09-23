@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "哥飞 SEO Agent",
+  "short_name": "哥飞 SEO",
+  "version": "0.1.0",
+  "description": "配合 seo.web.cafe 的哥飞 SEO Agent：Agent 需要谷歌趋势数据时，自动替你打开 Google Trends 取回来；在任何网站上一键问 Agent。",
+  "homepage_url": "https://seo.web.cafe/extension/",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "哥飞 SEO Agent",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "permissions": ["sidePanel", "storage", "activeTab"],
+  "host_permissions": ["https://trends.google.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://seo.web.cafe/*"],
+      "js": ["content/site-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://trends.google.com/*"],
+      "js": ["content/trends-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://trends.google.com/*"],
+      "js": ["lib/trends-parse.js", "content/trends-bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
