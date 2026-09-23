@@ -53,10 +53,10 @@ check("最后那个没过完的点（isPartial）留着、标 p: 1——谷歌�
 check("空曲线报错", () => { assert.throws(() => P.parseTimeline(XSSI + '{"default":{"timelineData":[]}}')); });
 
 console.log("【相关查询】");
-check("热门与上升最快分开，带网页上显示的值", () => {
+check("热门与上升最快分开，带网页上显示的值和原始数值（「飙升」按语言变字，排序靠数值）", () => {
   const r = P.parseRelated(XSSI + JSON.stringify(related));
-  assert.deepEqual(r.top, [{ q: "jev ai", v: "100" }, { q: "jev model", v: "62" }]);
-  assert.deepEqual(r.rising, [{ q: "jev api", v: "Breakout" }, { q: "jev vs llm", v: "+450%" }]);
+  assert.deepEqual(r.top, [{ q: "jev ai", v: "100", n: 100 }, { q: "jev model", v: "62", n: 62 }]);
+  assert.deepEqual(r.rising, [{ q: "jev api", v: "Breakout", n: 4550 }, { q: "jev vs llm", v: "+450%", n: 450 }]);
 });
 check("相关主题（没有 query 字段）跳过", () => {
   const r = P.parseRelated(XSSI + JSON.stringify(topics));

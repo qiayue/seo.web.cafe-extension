@@ -23,6 +23,10 @@ check("权限只有这三个：侧边栏、存进行中的取数任务、点图�
 check("不申请 tabs / 全部网站 / 历史记录这类大权限", () => {
   assert.ok(!m.permissions.includes("tabs") && !m.permissions.includes("history"));
 });
+check("「读取标签页网址」（tabs）只作可选权限：用户在侧边栏点「自动跟随当前网页」时才要", () => {
+  assert.deepEqual(m.optional_permissions, ["tabs"]);
+  assert.ok(!m.permissions.includes("tabs"));
+});
 check("站点权限只有谷歌趋势一个（看得到取数标签页的网址，才分得清它是不是被跳去了人机验证页）", () => {
   // 内容脚本的 matches 不算站点权限：只有它的话，后台读 tab.url 永远是空的，每个取数标签页都会被当成「被跳走了」
   assert.deepEqual(m.host_permissions, ["https://trends.google.com/*"]);

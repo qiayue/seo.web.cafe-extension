@@ -49,3 +49,10 @@ summary { cursor: pointer; color: var(--muted); }
 pre { max-height: 220px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
 button.small { width: auto; padding: 2px 10px; margin: 6px 0 0; font-size: 12px; }
 dd a { color: var(--amber-dk); }
+.follow { margin: -4px 0 8px; font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+button.link { width: auto; padding: 0; border: none; background: none; color: var(--amber-dk); text-decoration: underline; font-size: 12px; cursor: pointer; }
+button.link:hover { border: none; }
+button.link[hidden] { display: none; }
+.settings { margin: 0 0 12px; font-size: 12px; color: var(--muted); }
+.settings label { display: block; margin: 8px 0 4px; }
+.settings input { margin-bottom: 4px; }

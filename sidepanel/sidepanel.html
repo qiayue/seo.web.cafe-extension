@@ -16,10 +16,12 @@
     <h2>问问这个网站</h2>
     <p class="hint" id="pageHint">切到想看的网页，再点一下浏览器工具栏上的插件图标，这里就会换成那个网站。</p>
     <input id="pageUrl" type="text" placeholder="网址或域名，例如 example.com" spellcheck="false" autocomplete="off">
+    <p class="follow"><button type="button" class="link" id="followOn" hidden>自动跟随当前网页</button><span id="followNote"></span></p>
     <div class="btns">
       <button type="button" data-ask="traffic">这个站流量怎么起来的？</button>
       <button type="button" data-ask="keywords">它靠哪些词吃流量？</button>
       <button type="button" data-ask="page">这个页面的 SEO 怎么改？</button>
+      <button type="button" id="openAhrefs">在 Ahrefs 看外链和流量趋势 ↗</button>
     </div>
     <textarea id="custom" rows="3" placeholder="也可以自己问，会带上上面这个网址"></textarea>
     <button type="button" class="primary" id="askCustom">问 Agent</button>
@@ -48,6 +50,13 @@
     <p class="hint" id="trendsNote" hidden>0~100 是相对热度（这段时间里最热的点 = 100），不是搜索量。虚线是还没过完的那个点。</p>
     <button type="button" id="askWord">问 Agent：这个词是不是新词、值不值得做？</button>
   </section>
+
+  <details class="settings" id="settings">
+    <summary>设置</summary>
+    <label for="ahrefsBase">Ahrefs 地址（用镜像站就填它的域名，比如 https://ahrefs.3ue.com）</label>
+    <input id="ahrefsBase" type="text" placeholder="https://app.ahrefs.com" spellcheck="false" autocomplete="off">
+    <button type="button" class="small" id="saveAhrefs">保存</button> <span id="ahrefsSaved" class="hint"></span>
+  </details>
 
   <footer>
     <span id="ver"></span>

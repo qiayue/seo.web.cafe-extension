@@ -12,6 +12,7 @@
 //       ③ 取完自动关掉那个标签页；④ 谷歌限流（429）或跳去人机验证页时马上送回原因，并把标签页留在前台让用户看见；
 //       ④c 后台叫不醒时 8 秒后切到前台、取到后切回；④d 用户自己开的谷歌趋势标签页一概不碰；
 //       ⑤ 不是 seo.web.cafe 发来的请求一律不接；⑥ 侧边栏页面能打开、没有脚本错误；
+//       ⑥b Ahrefs 按钮（官方 / 镜像站地址可配）；⑧ 授权后自动跟随当前网页（手动填过的不覆盖）；
 //       ⑦ 侧边栏直接查谷歌趋势：曲线（没过完的点虚线）/ 统计 / 相关查询 / 原始 JSON，发现新的一波自动补查更细的，
 //          可选取完不关标签页，失败说原因。
 // 注意：无头 Chromium 不会像真浏览器那样冻结后台标签页，「叫醒」本身在这里测不出效果，只测它只作用于插件开的标签页；
@@ -117,12 +118,16 @@ function handle(req, res) {
     return send(404, "text/plain", "");
   }
   if (host === "www.google.com") return send(200, "text/html", "<title>unusual traffic</title>人机验证");
+  if (host === "app.ahrefs.com" || host === "ahrefs.3ue.com") return send(200, "text/html", "<title>Ahrefs (mock)</title>ahrefs");
+  if (host === "shop.example") return send(200, "text/html", "<title>Shop " + u.pathname + "</title>shop");
   if (host === "seo.web.cafe" || host === "evil.example") {
     if (u.pathname === "/extension/version.json") return send(200, "application/json", JSON.stringify({ version: MANIFEST.version }));
     return send(200, "text/html", chatPage);
   }
   send(404, "text/plain", "");
 }
+
+const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.example", "app.ahrefs.com", "ahrefs.3ue.com", "shop.example"];
 
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gefei-ext-"));
@@ -138,7 +143,7 @@ function handle(req, res) {
     args: [
       "--disable-extensions-except=" + EXT, "--load-extension=" + EXT,
       "--ignore-certificate-errors", "--no-proxy-server",
-      "--host-resolver-rules=" + ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.example"].map((h) => "MAP " + h + " 127.0.0.1:" + port).join(", "),
+      "--host-resolver-rules=" + HOSTS.map((h) => "MAP " + h + " 127.0.0.1:" + port).join(", "),
     ],
   });
 
@@ -250,6 +255,30 @@ function handle(req, res) {
     check("「这个站流量怎么起来的」→ 打开对话页并带上问题（去掉 www）", q === "imagedetector.com 这个站流量怎么起来的？", q);
     await chatTab.close();
 
+    // ⑥b 在 Ahrefs 里打开这个站：默认官方，设置里可以换成镜像站（贴带路径的地址也行，只取域名）
+    const openAhrefs = async () => {
+      const [t] = await Promise.all([context.waitForEvent("page"), panel.click("#openAhrefs")]);
+      await t.waitForLoadState();
+      const u = t.url();
+      await t.close();
+      return u;
+    };
+    const ahr1 = await openAhrefs();
+    check("Ahrefs：默认打开官方 Site Explorer（去掉 www、看全部子域）", ahr1 === "https://app.ahrefs.com/site-explorer/overview?target=imagedetector.com&mode=subdomains", ahr1);
+    await panel.click("#settings summary");
+    await panel.fill("#ahrefsBase", "not a url");
+    await panel.click("#saveAhrefs");
+    check("Ahrefs 地址写错：当场提示", /不像网址/.test(await panel.textContent("#ahrefsSaved")));
+    await panel.fill("#ahrefsBase", "https://ahrefs.3ue.com/dashboard");
+    await panel.click("#saveAhrefs");
+    const ahr2 = await openAhrefs();
+    check("Ahrefs 镜像站：填 …/dashboard 也只取域名，按同样的路径打开", ahr2 === "https://ahrefs.3ue.com/site-explorer/overview?target=imagedetector.com&mode=subdomains", ahr2);
+    await panel.reload();
+    await panel.waitForSelector("#openAhrefs");
+    await new Promise((r) => setTimeout(r, 300));
+    check("镜像站地址存下来了（重开侧边栏还在）", (await panel.inputValue("#ahrefsBase")) === "https://ahrefs.3ue.com");
+    check("没授权「读取标签页网址」时：显示「自动跟随当前网页」按钮", await panel.isVisible("#followOn"));
+
     // ⑦ 侧边栏直接查谷歌趋势（单独调试用，不经过 Agent）：同一条取数路，结果显示在侧边栏
     const trendsTabs2 = () => context.pages().filter((p) => p.url().startsWith("https://trends.google.com/"));
     const ask = async (kw) => {
@@ -305,11 +334,59 @@ function handle(req, res) {
     await panel.click("#trendsGo");
     check("地区写错：当场提示，不去开谷歌趋势", /两位国家码/.test(await panel.textContent("#trendsStatus")) && trendsTabs2().length === 0);
     await panel.fill("#geo", "");
+    await context.close();
+
+    // ⑧ 自动跟随当前网页：要用户授权可选权限 tabs——无头浏览器点不了授权弹窗，
+    //    所以拷一份插件、把 tabs 挪进必需权限（等于「已授权」），侧边栏代码一行不改
+    const extCopy = path.join(tmp, "ext-tabs");
+    fs.cpSync(EXT, extCopy, { recursive: true, filter: (src) => !/[\\/](node_modules|\.git)([\\/]|$)/.test(src) });
+    const mf = JSON.parse(fs.readFileSync(path.join(extCopy, "manifest.json"), "utf8"));
+    mf.permissions.push("tabs");
+    delete mf.optional_permissions;
+    fs.writeFileSync(path.join(extCopy, "manifest.json"), JSON.stringify(mf));
+    const ctx2 = await playwright.chromium.launchPersistentContext(path.join(tmp, "profile2"), {
+      channel: "chromium", ignoreHTTPSErrors: true,
+      args: ["--disable-extensions-except=" + extCopy, "--load-extension=" + extCopy, "--ignore-certificate-errors", "--no-proxy-server",
+        "--host-resolver-rules=" + HOSTS.map((h) => "MAP " + h + " 127.0.0.1:" + port).join(", ")],
+    });
+    try {
+      const sw2 = ctx2.serviceWorkers()[0] || await ctx2.waitForEvent("serviceworker", { timeout: 10000 });
+      const panel2 = await ctx2.newPage();
+      await panel2.goto("chrome-extension://" + new URL(sw2.url()).host + "/sidepanel/sidepanel.html");
+      await panel2.waitForSelector("#followNote");
+      await new Promise((r) => setTimeout(r, 300));
+      check("授权了：按钮收起、写明已开启", !(await panel2.isVisible("#followOn")) && /已开启/.test(await panel2.textContent("#followNote")));
+      const site = await ctx2.newPage();
+      await site.goto("https://shop.example/a");
+      await site.bringToFront();
+      await panel2.waitForFunction(() => document.getElementById("pageUrl").value === "https://shop.example/a", null, { timeout: 5000 }).catch(() => {});
+      check("切到别的网页：侧边栏自动换成它的网址，不用点插件图标", (await panel2.inputValue("#pageUrl")) === "https://shop.example/a", await panel2.inputValue("#pageUrl"));
+      await site.goto("https://shop.example/b");
+      await panel2.waitForFunction(() => document.getElementById("pageUrl").value === "https://shop.example/b", null, { timeout: 5000 }).catch(() => {});
+      check("同一个标签页里跳到别的页面：也跟上", (await panel2.inputValue("#pageUrl")) === "https://shop.example/b");
+      await site.goto("https://seo.web.cafe/chat/");
+      await new Promise((r) => setTimeout(r, 800));
+      const ahr = await ctx2.newPage();
+      await ahr.goto("https://app.ahrefs.com/site-explorer/overview?target=x.com");
+      await ahr.bringToFront();
+      await new Promise((r) => setTimeout(r, 800));
+      check("切到对话页、Ahrefs：不跟（不把要问的网站换成它们）", (await panel2.inputValue("#pageUrl")) === "https://shop.example/b", await panel2.inputValue("#pageUrl"));
+      await ahr.close();
+      await panel2.fill("#pageUrl", "mysite.com");
+      await site.goto("https://shop.example/c");
+      await site.bringToFront();
+      await panel2.waitForFunction(() => /换成它/.test(document.getElementById("pageHint").textContent), null, { timeout: 5000 }).catch(() => {});
+      check("手动填过网址：不覆盖，提示里给「换成它」", (await panel2.inputValue("#pageUrl")) === "mysite.com" && /shop\.example\/c|Shop \/c/.test(await panel2.textContent("#pageHint")));
+      await panel2.click("#pageHint button");
+      check("点「换成它」：换成当前网页", (await panel2.inputValue("#pageUrl")) === "https://shop.example/c");
+    } finally {
+      await ctx2.close();
+    }
   } catch (e) {
     failed++;
     console.log("  ✕ 跑挂了：" + (e && e.stack || e));
   } finally {
-    await context.close();
+    await context.close().catch(() => {});
     server.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }

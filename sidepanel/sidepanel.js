@@ -238,16 +238,95 @@
   $("trendsGo").addEventListener("click", query);
   $("word").addEventListener("keydown", function (e) { if (e.key === "Enter") query(); });
 
-  // 当前网页：点插件图标时后台记下的（见 background.js）
-  function showPage(p) {
-    if (p && p.url) {
-      $("pageUrl").value = p.url;
-      $("pageHint").textContent = "当前网页：" + (p.title || p.url);
+  // ---------- 当前网页 ----------
+  // 两个来源：① 点插件图标那一下（activeTab，不用额外权限，后台记在 storage.session.lastPage）；
+  // ② 用户点了「自动跟随当前网页」、授权了可选权限 tabs（Chrome 会写成「读取浏览记录」）之后：本窗口里换标签页、
+  //    页面跳转都自动跟上。网址只填进这个输入框，不存、不上传。seo.web.cafe 和插件开的谷歌趋势标签页不跟。
+  // 输入框被用户手动改过就不覆盖，只在提示里给一个「换成它」
+  var myWin = null, edited = false;
+  $("pageUrl").addEventListener("input", function () { edited = true; });
+  function showPage(p, auto) {
+    if (!p || !p.url) return;
+    var hint = $("pageHint");
+    if (auto && edited && $("pageUrl").value.trim() !== p.url) {
+      hint.textContent = "当前网页：" + (p.title || p.url) + " ";
+      var use = el("button", "link", "换成它");
+      use.type = "button";
+      use.addEventListener("click", function () { edited = false; showPage(p, false); });
+      hint.appendChild(use);
+      return;
     }
+    $("pageUrl").value = p.url;
+    edited = false;
+    hint.textContent = "当前网页：" + (p.title || p.url);
   }
-  chrome.storage.session.get("lastPage").then(function (r) { showPage(r.lastPage); });
+  chrome.storage.session.get("lastPage").then(function (r) { showPage(r.lastPage, false); });
   chrome.storage.onChanged.addListener(function (changes, area) {
-    if (area === "session" && changes.lastPage) showPage(changes.lastPage.newValue);
+    if (area === "session" && changes.lastPage) showPage(changes.lastPage.newValue, false); // 点图标是明确的动作：照填
+  });
+
+  function follow(tab) {
+    if (!tab || !tab.active || (myWin !== null && tab.windowId !== myWin)) return;
+    var u = tab.url || ""; // 没授权时浏览器不给网址，这里自然什么都不做
+    if (!/^https?:\/\//.test(u)) return;
+    var h = new URL(u).hostname;
+    // 自家对话页、插件开的谷歌趋势、Ahrefs 本身（切过去看 Ahrefs 时别把要问的网站换成 Ahrefs 的网址）都不跟
+    if (h === "seo.web.cafe" || h === "trends.google.com" || h === "app.ahrefs.com" || h === new URL(ahrefsBase).hostname) return;
+    showPage({ url: u, title: tab.title || "" }, true);
+  }
+  chrome.tabs.onActivated.addListener(function (info) {
+    if (myWin !== null && info.windowId !== myWin) return;
+    chrome.tabs.get(info.tabId).then(follow, function () {});
+  });
+  chrome.tabs.onUpdated.addListener(function (id, info, tab) { if (info.url || info.status === "complete") follow(tab); });
+  function followState() {
+    return chrome.permissions.contains({ permissions: ["tabs"] }).then(function (on) {
+      $("followOn").hidden = on;
+      $("followNote").textContent = on ? "已开启：换网页会自动换成新网址" : "";
+      if (on) chrome.tabs.query(myWin !== null ? { active: true, windowId: myWin } : { active: true, currentWindow: true }).then(function (t) { follow(t && t[0]); });
+    });
+  }
+  $("followOn").addEventListener("click", function () {
+    chrome.permissions.request({ permissions: ["tabs"] }).then(function (ok) {
+      followState().then(function () { if (!ok) $("followNote").textContent = "没授权：换网页后点一下插件图标就行"; });
+    }, function () {});
+  });
+  if (chrome.permissions.onAdded) chrome.permissions.onAdded.addListener(followState);
+  if (chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(followState);
+  chrome.windows.getCurrent().then(function (w) { myWin = w && w.id; followState(); }, followState);
+
+  // ---------- Ahrefs：帮你在 Ahrefs 里打开这个站的 Site Explorer（用你自己登录的账号看），插件不读 Ahrefs 页面上的数据 ----------
+  // 有人用的不是官方 app.ahrefs.com，而是镜像站（比如 https://ahrefs.3ue.com）：地址在「设置」里改，存在 storage.local，
+  // 只留域名部分（贴进来的是 …/dashboard 也行），路径沿用官方的 /site-explorer/overview
+  var AHREFS_DEFAULT = "https://app.ahrefs.com";
+  var ahrefsBase = AHREFS_DEFAULT;
+  /** 用户填的东西 → 规整成 https://域名；不像网址返回 null */
+  function normBase(raw) {
+    var s = String(raw || "").trim();
+    if (!s) return AHREFS_DEFAULT;
+    try {
+      var u = new URL(/^https?:\/\//i.test(s) ? s : "https://" + s);
+      if (!/^https?:$/.test(u.protocol) || !/\./.test(u.hostname)) return null;
+      return u.origin;
+    } catch (e) { return null; }
+  }
+  function showBase() {
+    $("ahrefsBase").value = ahrefsBase === AHREFS_DEFAULT ? "" : ahrefsBase;
+    $("openAhrefs").title = "在 " + ahrefsBase.replace(/^https?:\/\//, "") + " 打开 Site Explorer";
+  }
+  chrome.storage.local.get("ahrefsBase").then(function (r) { ahrefsBase = normBase(r.ahrefsBase) || AHREFS_DEFAULT; showBase(); }, showBase);
+  $("saveAhrefs").addEventListener("click", function () {
+    var b = normBase($("ahrefsBase").value);
+    if (!b) { $("ahrefsSaved").textContent = "这不像网址，填 https://开头的域名，比如 https://ahrefs.3ue.com"; return; }
+    ahrefsBase = b;
+    chrome.storage.local.set({ ahrefsBase: b === AHREFS_DEFAULT ? "" : b }).then(function () {
+      showBase();
+      $("ahrefsSaved").textContent = "已保存：" + b.replace(/^https?:\/\//, "");
+    });
+  });
+  $("openAhrefs").addEventListener("click", function () {
+    var t = need();
+    if (t) chrome.tabs.create({ url: ahrefsBase + "/site-explorer/overview?target=" + encodeURIComponent(t.host) + "&mode=subdomains" });
   });
 
   // 版本：本地加载的插件不会自动更新，谷歌趋势的内部接口一变就会取不到数，落后了就提示去下载新版
