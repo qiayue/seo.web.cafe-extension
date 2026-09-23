@@ -48,7 +48,8 @@
       // kind: "ahrefs"（0.8.0 起）= 读这个站（target）的 Ahrefs Site Explorer；"page"（0.9.0 起）= 用浏览器打开 url 读回来；不带 = 谷歌趋势
       var kind = d.kind === "ahrefs" || d.kind === "page" ? d.kind : undefined;
       chrome.runtime.sendMessage({ type: "trends:fetch", requestId: d.requestId, keyword: d.keyword, geo: d.geo || "", date: d.date, kind: kind,
-        target: kind === "ahrefs" ? String(d.target || "") : undefined, url: kind === "page" ? String(d.url || "") : undefined }, function (res) {
+        target: kind === "ahrefs" ? String(d.target || "") : undefined, url: kind === "page" ? String(d.url || "") : undefined,
+        minMs: kind === "page" ? Number(d.minMs) || 0 : undefined }, function (res) {
         if (chrome.runtime.lastError) {
           var m = chrome.runtime.lastError.message || "";
           if (/context invalidated/i.test(m)) { post({ type: "trends:stale", requestId: d.requestId }); return; }

@@ -91,8 +91,8 @@ const chatPage = `<!doctype html><title>chat (mock)</title><script>
   });
   window.__cancel = function (id) { window.postMessage({ source: 'gefei-seo-page', type: 'trends:cancel', requestId: id }, location.origin); };
   window.postMessage({ source: 'gefei-seo-page', type: 'ping' }, location.origin);
-  window.__page = function (id, url) {
-    window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'page', requestId: id, url: url }, location.origin);
+  window.__page = function (id, url, minMs) {
+    window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'page', requestId: id, url: url, minMs: minMs || 0 }, location.origin);
   };
   window.__ahrefs = function (id, target) {
     window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'ahrefs', requestId: id, target: target }, location.origin);
@@ -126,6 +126,15 @@ const jsApp = `<!doctype html><html lang="en"><head><title>JS App</title><meta n
 </script></body></html>`;
 const loginPage = "<!doctype html><title>Sign in</title><main><h1>Sign in</h1><form><input type=email><input type=password></form></main>";
 const canvasPage = "<!doctype html><title>Sheet</title><body style=margin:0><div>表格 1</div><canvas width=1200 height=900 style='width:100vw;height:100vh'></canvas></body>";
+// GSC 那样一块一块填数据的报告页：进度条一直转到 2.5 秒，数字才填完
+const busyPage = `<!doctype html><meta charset="utf-8"><title>Report</title><main><h1>网页编入索引</h1><div id="bar" role="progressbar" style="width:200px;height:4px;background:#999"></div><div id="n">加载中</div></main><script>
+  setTimeout(function () { document.getElementById('n').textContent = '已编入索引 12,340'; }, 800);
+  setTimeout(function () { document.getElementById('n').textContent = '已编入索引 12,340 未编入索引 5,678'; document.getElementById('bar').remove(); }, 2500);
+</script>`;
+// 文字先稳住一阵、3.5 秒后才换成真数字（没有进度条）：只有「至少再等 4 秒」接得住
+const latePage = `<!doctype html><meta charset="utf-8"><title>Late</title><main><p id="t">概览</p></main><script>
+  setTimeout(function () { document.getElementById('t').textContent = '概览 点击 1,234 曝光 56,789'; }, 3500);
+</script>`;
 
 // 本机假站：按 Host 分发。证书现生成（自签，浏览器那边用 --ignore-certificate-errors 放行），不进仓库
 function makeCert(dir) {
@@ -175,6 +184,8 @@ function handle(req, res) {
     if (u.pathname === "/app") return send(200, "text/html", jsApp);
     if (u.pathname === "/login") return send(200, "text/html", loginPage);
     if (u.pathname === "/sheet") return send(200, "text/html", canvasPage);
+    if (u.pathname === "/busy") return send(200, "text/html; charset=utf-8", busyPage);
+    if (u.pathname === "/late") return send(200, "text/html; charset=utf-8", latePage);
     if (u.pathname === "/away") { res.writeHead(302, { location: "https://other.example/landing" }); return res.end(); }
     return send(404, "text/plain", "");
   }
@@ -613,8 +624,8 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       check("允许之后：关掉「允许」页面、接着去 Ahrefs 读，结果交回对话页", fakeGone && rw && rw.ok && rw.data.series.length === 3, rw && (rw.error || rw.data.series.length));
 
       // ⑫ 用浏览器打开网页读回来（允许过 js.example）：页面脚本画出来的内容也读得到；# 后面的留着；读完关掉
-      const readPage = async (id, url) => {
-        await chat2.evaluate(([i, u]) => window.__page(i, u), [id, url]);
+      const readPage = async (id, url, minMs) => {
+        await chat2.evaluate(([i, u, m]) => window.__page(i, u, m), [id, url, minMs || 0]);
         await chat2.waitForFunction((i) => window.__results[i], id, { timeout: 40000 }).catch(() => {});
         return chat2.evaluate((i) => window.__results[i] || null, id);
       };
@@ -632,6 +643,22 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       check("在线表格（内容画在 canvas 上）：标明读不出文字", p3 && p3.ok && p3.data.canvas === true, p3 && (p3.error || JSON.stringify(p3.data.canvas)));
       const p4 = await readPage("0".repeat(32), "https://js.example/away");
       check("跳到了没被允许读的网站：说清楚，不硬读", p4 && p4.ok === false && /跳到了插件没被允许读的网址/.test(p4.error), p4 && p4.error);
+      // 一块一块填数据的报告页（GSC）：进度条还在转就不算读完；「至少再等 N 秒」接得住文字稳住一阵后才换的
+      const pb = await readPage("a1".repeat(16), "https://js.example/busy");
+      check("报告页进度条还在转：等它转完才读（读到填完的数字）", pb && pb.ok && /未编入索引 5,678/.test(pb.data.text) && pb.data.busy === false, pb && (pb.error || pb.data.text));
+      const pl0 = await readPage("a2".repeat(16), "https://js.example/late");
+      const pl = await readPage("a3".repeat(16), "https://js.example/late", 4000);
+      check("不等：文字稳住一阵就当读完（读到的还是旧的）；等 4 秒：读到后来填进去的数字", pl0 && pl0.ok && !/1,234/.test(pl0.data.text) && pl && pl.ok && /点击 1,234 曝光 56,789/.test(pl.data.text),
+        (pl0 && pl0.data && pl0.data.text) + " | " + (pl && pl.data && pl.data.text));
+      for (const p of pageTabs()) await p.close();
+
+      // 侧边栏调试：用浏览器读上面这个网址，显示读到了什么（发样本给开发者就靠它）
+      await panel2.fill("#pageUrl", "https://js.example/app");
+      await panel2.click("#readPage");
+      await panel2.waitForFunction(() => /\b(ok|err)\b/.test(document.getElementById("pageStatus").className), null, { timeout: 40000 }).catch(() => {});
+      const dbgStatus = await panel2.textContent("#pageStatus");
+      const dbgRaw = JSON.parse((await panel2.textContent("#pageOut pre").catch(() => "{}")) || "{}");
+      check("侧边栏「用浏览器读这个网页给我看」：显示读到多少字、几张表，原始 JSON 可复制", /读到了：正文 \d+ 字、1 张表/.test(dbgStatus) && dbgRaw.data && /Hello from JS/.test(dbgRaw.data.text), dbgStatus);
       for (const p of pageTabs()) await p.close();
 
       // 镜像站：在设置里换地址，读数据照样走（侧边栏调试按钮，不经过 Agent）

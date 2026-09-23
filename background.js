@@ -347,7 +347,8 @@ function startPageJob(msg, from) {
         var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
         return dup ? null : openJob(msg, from, url, {
           noMark: true,
-          fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1 },
+          // minMs：加载完之后至少再等这么久才算读完（GSC 这类一块一块填数据的报告页用，最多 15 秒）
+          fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)) },
           label: { keyword: host, range: "打开网页", geo: "" },
           opened: "已在后台打开 " + host + "，等页面加载…",
           onTimeout: function (tabId) { finishPage(tabId, true); },
@@ -369,7 +370,8 @@ function schedulePagePoll(tabId) {
             var j = jobs2[tabId];
             if (!j) return null;
             j.polls = (j.polls || 0) + 1;
-            var stable = page && page.textChars > 0 && page.textChars === j.lastLen && !page.challenge;
+            var settled = Date.now() >= (j.loadedAt || j.startedAt) + (j.minMs || 0);
+            var stable = page && page.textChars > 0 && page.textChars === j.lastLen && !page.challenge && !page.busy && settled;
             j.lastLen = page ? page.textChars : -1;
             j.page = page || j.page;
             return saveJobs(jobs2).then(function () { return { job: j, stable: stable, page: page }; });

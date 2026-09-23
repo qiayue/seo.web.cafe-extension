@@ -272,7 +272,51 @@
     }
   }
 
+  // 调试：不经过 Agent，用浏览器打开上面这个网址读一次，读到什么就显示什么（GSC 这类页面发样本给开发者就靠它）
+  var pagePending = null;
+  function pageShow(text, cls) { var e = $("pageStatus"); e.hidden = false; e.textContent = text; e.className = "status" + (cls ? " " + cls : ""); }
+  $("readPage").addEventListener("click", function () {
+    var t = need();
+    if (!t || pagePending) return;
+    var out = $("pageOut");
+    while (out.firstChild) out.removeChild(out.firstChild);
+    pagePending = { id: newId() };
+    pagePending.timer = setTimeout(function () { pageDone({ requestId: pagePending && pagePending.id, ok: false, error: "3 分钟没等到插件后台的回音" }); }, 180000);
+    pageShow("正在后台打开 " + t.url + " 读页面……");
+    var minMs = /^https:\/\/search\.google\.com\/search-console/.test(t.url) ? 4000 : 0; // GSC 的报告是一块一块填进来的，多等一会儿
+    chrome.windows.getCurrent().then(function (win) {
+      return chrome.runtime.sendMessage({ type: "trends:fetch", kind: "page", requestId: pagePending.id, url: t.url, minMs: minMs, windowId: win && win.id });
+    }).then(function (r) {
+      if (!r || !r.ok) pageDone({ requestId: pagePending && pagePending.id, ok: false, error: (r && r.error) || "插件后台没接住请求" });
+    }, function (e) { pageDone({ requestId: pagePending && pagePending.id, ok: false, error: String((e && e.message) || e) }); });
+  });
+  function pageDone(res) {
+    if (!pagePending || res.requestId !== pagePending.id) return;
+    clearTimeout(pagePending.timer);
+    pagePending = null;
+    if (!res.ok) { pageShow("没读到：" + (res.error || "原因不明"), "err"); return; }
+    var d = res.data || {};
+    var flags = [d.login && "要登录", d.challenge && "像是人机验证页", d.canvas && "内容画在 canvas 上（读不出文字）", d.busy && "读的时候还在加载"].filter(Boolean);
+    pageShow("读到了：正文 " + (d.textChars || 0) + " 字、" + (d.tables || []).length + " 张表、" + (d.links || []).length + " 个链接" + (flags.length ? "（" + flags.join("，") + "）" : ""), flags.length ? "" : "ok");
+    var box = el("div", "result"), dl = el("dl");
+    row(dl, "标题", d.title || "（无）");
+    row(dl, "网址", d.finalUrl || "");
+    row(dl, "正文开头", String(d.text || "").slice(0, 300));
+    box.appendChild(dl);
+    var raw = el("details");
+    raw.appendChild(el("summary", null, "原始数据（JSON，发样本就复制这一段）"));
+    var copy = el("button", "small", "复制");
+    copy.type = "button";
+    var pre = el("pre", null, JSON.stringify(res, null, 2));
+    copy.addEventListener("click", function () { navigator.clipboard.writeText(pre.textContent).then(function () { copy.textContent = "已复制"; setTimeout(function () { copy.textContent = "复制"; }, 1500); }, function () {}); });
+    raw.appendChild(copy); raw.appendChild(pre);
+    box.appendChild(raw);
+    $("pageOut").appendChild(box);
+  }
+
   chrome.runtime.onMessage.addListener(function (msg) {
+    if (msg && msg.type === "trends:result" && pagePending && msg.requestId === pagePending.id) { pageDone(msg); return; }
+    if (msg && msg.type === "trends:progress" && pagePending && msg.requestId === pagePending.id && msg.text) { pageShow(msg.text); return; }
     if (msg && msg.type === "trends:result" && ahrefsPending && msg.requestId === ahrefsPending.id) { ahrefsDone(msg); return; }
     if (msg && msg.type === "trends:progress" && ahrefsPending && msg.requestId === ahrefsPending.id && msg.text) { ahrefsShow(msg.text); return; }
     if (!msg || !pending || msg.requestId !== pending.id) return;
