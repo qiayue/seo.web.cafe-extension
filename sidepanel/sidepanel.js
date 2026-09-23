@@ -49,16 +49,22 @@
   });
 
   // ---------- 谷歌趋势：插件直接取数，显示在这里（单独调试用，不经过 Agent、不进网站缓存） ----------
-  // 和对话页走同一条取数路（background.js 开标签页 → 内容脚本截数据），只是结果送回侧边栏
-  var pending = null; // { id, timer }
+  // 和对话页走同一条取数路（background.js 开标签页 → 内容脚本截数据），只是结果送回侧边栏。
+  // 查到的曲线里如果有「新的一波」（之前热度很小、最近冲起来），自动按这一波出现的时间再查一次更细的：
+  // 这一周起来的查过去 7 天（按小时），一个月内起来的查过去 30 天（按天），三个月内的查过去 90 天（按天）。
+  // 判断规则在 lib/trends-parse.js（latestWave / finerDate），和网站那边 google_trends 工具是同一套
+  var P = window.GefeiTrendsParse;
+  var LABEL = { "now 7-d": "过去 7 天（按小时）", "today 1-m": "过去 30 天（按天）", "today 3-m": "过去 90 天（按天）", "today 12-m": "过去 12 个月（按周）", "today 5-y": "过去 5 年（按周）" };
+  var UNIT = { "now 7-d": "小时", "today 1-m": "天", "today 3-m": "天", "today 12-m": "周", "today 5-y": "周" };
+  var pending = null; // { id, keyword, geo, date, auto, timer }
   function newId() {
     var b = new Uint8Array(16);
     crypto.getRandomValues(b);
     return Array.prototype.map.call(b, function (x) { return ("0" + x.toString(16)).slice(-2); }).join("");
   }
   function setStatus(text, cls) {
-    $("trendsOut").hidden = false;
     var el = $("trendsStatus");
+    el.hidden = false;
     el.textContent = text;
     el.className = "status" + (cls ? " " + cls : "");
   }
@@ -68,86 +74,153 @@
     var day = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
     return hourly ? day + " " + pad(d.getHours()) + ":00" : day;
   }
-  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
   function svg(tag, attrs) {
-    var el = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (var k in attrs) el.setAttribute(k, attrs[k]);
-    return el;
+    var e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
   }
   function row(dl, k, v) {
-    var dt = document.createElement("dt"); dt.textContent = k;
-    var dd = document.createElement("dd");
+    dl.appendChild(el("dt", null, k));
+    var dd = el("dd");
     if (v instanceof Node) dd.appendChild(v); else dd.textContent = v;
-    dl.appendChild(dt); dl.appendChild(dd);
+    dl.appendChild(dd);
   }
-  function list(ol, items) {
-    clear(ol);
-    if (!items || !items.length) { var li = document.createElement("li"); li.textContent = "（没有）"; ol.appendChild(li); return; }
+  function list(items) {
+    var ol = el("ol");
+    if (!items || !items.length) { ol.appendChild(el("li", null, "（没有）")); return ol; }
     items.forEach(function (it) {
-      var li = document.createElement("li");
-      li.textContent = it.q;
-      var sp = document.createElement("span"); sp.textContent = it.v;
-      li.appendChild(sp);
+      var li = el("li", null, it.q);
+      li.appendChild(el("span", null, it.v));
       ol.appendChild(li);
     });
+    return ol;
   }
+  function sec(ms) { return (ms / 1000).toFixed(1) + " 秒"; }
 
-  var UNIT = { "now 7-d": "按小时", "today 1-m": "按天", "today 12-m": "按周", "today 5-y": "按周" };
-  function render(res, date) {
-    var d = res.data || {}, pts = d.points || [], dbg = res.debug || {}, hourly = date === "now 7-d";
-    $("chartBox").hidden = false;
-    var chart = $("chart");
-    clear(chart);
+  /** 一次查询的结果卡片：曲线（没过完的那个点画虚线）、统计、相关查询、原始 JSON */
+  function card(res, q) {
+    var d = res.data || {}, pts = d.points || [], dbg = res.debug || {};
+    var hourly = q.date === "now 7-d", unit = UNIT[q.date] || "";
+    var box = el("div", "result");
+    box.appendChild(el("h3", null, LABEL[q.date] + " · " + (q.geo || "全球") + (q.auto ? " · 自动补查" : "")));
+
+    var chart = svg("svg", { viewBox: "0 0 300 100", preserveAspectRatio: "none", "aria-label": "相对热度曲线" });
     [25, 50, 75].forEach(function (y) { chart.appendChild(svg("line", { x1: 0, x2: 300, y1: y, y2: y })); });
     var n = pts.length;
-    chart.appendChild(svg("polyline", { points: pts.map(function (p, i) {
-      return (n > 1 ? (i / (n - 1)) * 300 : 150).toFixed(1) + "," + (100 - p.v).toFixed(1);
-    }).join(" ") }));
-    $("axisFrom").textContent = n ? fmt(pts[0].t, hourly) : "";
-    $("axisTo").textContent = n ? fmt(pts[n - 1].t, hourly) : "";
+    var xy = function (p, i) { return (n > 1 ? (i / (n - 1)) * 300 : 150).toFixed(1) + "," + (100 - p.v).toFixed(1); };
+    var partial = n && pts[n - 1].p ? pts[n - 1] : null;
+    var full = partial ? pts.slice(0, n - 1) : pts;
+    chart.appendChild(svg("polyline", { "class": "full", points: full.map(xy).join(" ") }));
+    if (partial && n > 1) chart.appendChild(svg("polyline", { "class": "partial", points: xy(pts[n - 2], n - 2) + " " + xy(partial, n - 1) }));
+    box.appendChild(chart);
+    var axis = el("div", "axis");
+    axis.appendChild(el("span", null, n ? fmt(pts[0].t, hourly) : ""));
+    axis.appendChild(el("span", null, n ? fmt(pts[n - 1].t, hourly) : ""));
+    box.appendChild(axis);
 
-    var dl = $("stats");
-    clear(dl);
+    var dl = el("dl");
     var peak = null, first = null;
-    pts.forEach(function (p) { if (!peak || p.v > peak.v) peak = p; if (!first && p.v > 0) first = p; });
-    row(dl, "点数", n + " 个（" + (UNIT[date] || "") + "）");
-    if (peak) row(dl, "最高点", peak.v + "（" + fmt(peak.t, hourly) + "）");
-    row(dl, "第一次有热度", first ? fmt(first.t, hourly) + (pts[0].v > 0 ? "（开头就有，不是这段时间里新冒出来的）" : "") : "整段都是 0");
-    if (n) row(dl, "最新一个点", pts[n - 1].v + "（" + fmt(pts[n - 1].t, hourly) + "，没过完的那个点已去掉）");
-    if (dbg.ms != null) row(dl, "耗时", (dbg.ms / 1000).toFixed(1) + " 秒" + (dbg.related ? "" : "（相关查询没等到，只拿到曲线）"));
+    pts.forEach(function (p) { if (!peak || p.v >= peak.v) peak = p; if (!first && p.v >= 5) first = p; });
+    var half = "（这一" + unit + "还没过完，只是半截）";
+    row(dl, "点数", n + " 个（按" + unit + (partial ? "，最后 1 个没过完" : "") + "）");
+    if (peak) row(dl, "最高点", peak.v + "（" + fmt(peak.t, hourly) + (peak.p ? "，" + half.slice(1) : "）"));
+    var wave = P.latestWave(pts);
+    if (wave) row(dl, "最新一波", fmt(wave.start.t, hourly) + " 起" + (unit === "周" ? "的那一周" : "") + "（之前最高只有 " + wave.before + "）");
+    // 5 以上才算「有热度」（相对峰值 5%），和网站那边的口径一致；开头就在 5 以上才说「开头就有」
+    else row(dl, "第一次有热度", first ? fmt(first.t, hourly) + (first === pts[0] ? "（开头就有，不是这段时间里新冒出来的）" : "") : "整段都没到 5");
+    if (n) row(dl, "最新一个点", pts[n - 1].v + "（" + fmt(pts[n - 1].t, hourly) + (partial ? "，" + half.slice(1) : "）"));
+    if (dbg.ms != null) {
+      var parts = [];
+      if (dbg.loadMs != null) parts.push("页面加载完 " + sec(dbg.loadMs));
+      if (dbg.foregroundMs != null) parts.push("切到前台 " + sec(dbg.foregroundMs));
+      if (dbg.timelineMs != null) parts.push("曲线到 " + sec(dbg.timelineMs));
+      if (dbg.relatedMs != null) parts.push("相关查询到 " + sec(dbg.relatedMs));
+      row(dl, "耗时", sec(dbg.ms) + (parts.length ? "（" + parts.join(" · ") + "）" : "") + (dbg.related ? "" : "；相关查询没等到，只拿到曲线"));
+    }
     if (dbg.url) {
-      var a = document.createElement("a");
-      a.href = dbg.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "打开这个谷歌趋势网页";
+      var a = el("a", null, "打开这个谷歌趋势网页");
+      a.href = dbg.url; a.target = "_blank"; a.rel = "noopener";
       row(dl, "网页", a);
     }
-    list($("rising"), d.rising);
-    list($("top"), d.top);
+    box.appendChild(dl);
+
+    var rel = el("div", "rel");
+    var r1 = el("div"); r1.appendChild(el("h4", null, "上升最快")); r1.appendChild(list(d.rising));
+    var r2 = el("div"); r2.appendChild(el("h4", null, "热门")); r2.appendChild(list(d.top));
+    rel.appendChild(r1); rel.appendChild(r2);
+    box.appendChild(rel);
+
+    var raw = el("details");
+    raw.appendChild(el("summary", null, "原始数据（JSON）"));
+    var copy = el("button", "small", "复制");
+    copy.type = "button";
+    var pre = el("pre", null, JSON.stringify(res, null, 2));
+    copy.addEventListener("click", function () {
+      navigator.clipboard.writeText(pre.textContent).then(function () {
+        copy.textContent = "已复制";
+        setTimeout(function () { copy.textContent = "复制"; }, 1500);
+      }, function () {});
+    });
+    raw.appendChild(copy); raw.appendChild(pre);
+    box.appendChild(raw);
+    $("results").appendChild(box);
+    $("trendsNote").hidden = false;
+    return wave;
   }
 
-  function showRaw(res) {
-    $("rawBox").hidden = false;
-    $("raw").textContent = JSON.stringify(res, null, 2);
+  function busy(on) {
+    $("trendsGo").disabled = on;
+    $("trendsGo").textContent = on ? "正在取…" : "查询";
+  }
+
+  function fetchTrends(q) {
+    q.id = newId();
+    q.timer = setTimeout(function () { done({ requestId: q.id, ok: false, error: "60 秒没等到插件后台的回音" }); }, 60000);
+    pending = q;
+    busy(true);
+    chrome.windows.getCurrent().then(function (win) {
+      return chrome.runtime.sendMessage({ type: "trends:fetch", requestId: q.id, keyword: q.keyword, geo: q.geo, date: q.date,
+        keepTab: $("keepTab").checked, foreground: $("foreground").checked, windowId: win && win.id });
+    }).then(function (r) {
+      if (!r || !r.ok) done({ requestId: q.id, ok: false, error: (r && r.error) || "插件后台没接住请求" });
+      // 接住了：结果稍后由后台广播回来（下面的 onMessage）
+    }, function (e) { done({ requestId: q.id, ok: false, error: String((e && e.message) || e) }); });
   }
 
   function done(res) {
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    var date = pending.date;
+    var q = pending;
+    if (!q || res.requestId !== q.id) return;
+    clearTimeout(q.timer);
     pending = null;
-    $("trendsGo").disabled = false;
-    $("trendsGo").textContent = "查询";
-    showRaw(res);
-    if (res.ok) {
-      setStatus("取到了：" + ((res.data && res.data.keyword) || word()), "ok");
-      render(res, date);
+    busy(false);
+    if (!res.ok) {
+      var box = el("div", "result");
+      box.appendChild(el("h3", null, LABEL[q.date] + " · " + (q.geo || "全球") + (q.auto ? " · 自动补查" : "")));
+      box.appendChild(el("p", "status err", "没取到：" + (res.error || "原因不明")));
+      $("results").appendChild(box);
+      setStatus(q.auto ? "补查没取到，上面那次的结果还在。" : "没取到：" + (res.error || "原因不明"), "err");
+      return;
+    }
+    var wave = card(res, q);
+    var finer = !q.auto && $("autoFiner").checked ? P.finerDate(q.date, wave, Math.floor(Date.now() / 1000)) : null;
+    if (finer) {
+      setStatus("最新一波从 " + fmt(wave.start.t, false) + (UNIT[q.date] === "周" ? " 那一周" : "") + " 起（之前最高只有 " + wave.before + "），接着查" + LABEL[finer] + "看它是哪天起来的……");
+      fetchTrends({ keyword: q.keyword, geo: q.geo, date: finer, auto: true });
     } else {
-      $("chartBox").hidden = true;
-      setStatus("没取到：" + (res.error || "原因不明"), "err");
+      setStatus("取到了：" + ((res.data && res.data.keyword) || q.keyword) + (q.auto ? "（含自动补查）" : ""), "ok");
     }
   }
 
   chrome.runtime.onMessage.addListener(function (msg) {
-    if (msg && msg.type === "trends:result" && pending && msg.requestId === pending.id) done(msg);
+    if (!msg || !pending || msg.requestId !== pending.id) return;
+    if (msg.type === "trends:result") done(msg);
+    else if (msg.type === "trends:progress" && msg.text) setStatus(msg.text);
   });
 
   function query() {
@@ -156,28 +229,14 @@
     if (pending) return;
     var geo = $("geo").value.trim().toUpperCase();
     if (geo && !/^[A-Z]{2}$/.test(geo)) { setStatus("地区要写两位国家码，比如 US、GB、IN；不填就是全球。", "err"); return; }
-    var id = newId(), date = $("range").value;
-    pending = { id: id, date: date, timer: setTimeout(function () { done({ ok: false, error: "60 秒没等到插件后台的回音" }); }, 60000) };
-    $("trendsGo").disabled = true;
-    $("trendsGo").textContent = "正在取…";
-    $("chartBox").hidden = true;
-    $("rawBox").hidden = true;
+    var results = $("results");
+    while (results.firstChild) results.removeChild(results.firstChild);
+    $("trendsNote").hidden = true;
     setStatus("正在后台打开谷歌趋势取「" + w + "」，一般几秒到十几秒……");
-    chrome.windows.getCurrent().then(function (win) {
-      return chrome.runtime.sendMessage({ type: "trends:fetch", requestId: id, keyword: w, geo: geo, date: date, keepTab: $("keepTab").checked, windowId: win && win.id });
-    }).then(function (r) {
-      if (!r || !r.ok) done({ ok: false, error: (r && r.error) || "插件后台没接住请求" });
-      // 接住了：结果稍后由后台广播回来（上面的 onMessage）
-    }, function (e) { done({ ok: false, error: String((e && e.message) || e) }); });
+    fetchTrends({ keyword: w, geo: geo, date: $("range").value, auto: false });
   }
   $("trendsGo").addEventListener("click", query);
   $("word").addEventListener("keydown", function (e) { if (e.key === "Enter") query(); });
-  $("copyRaw").addEventListener("click", function () {
-    navigator.clipboard.writeText($("raw").textContent).then(function () {
-      $("copyRaw").textContent = "已复制";
-      setTimeout(function () { $("copyRaw").textContent = "复制"; }, 1500);
-    }, function () {});
-  });
 
   // 当前网页：点插件图标时后台记下的（见 background.js）
   function showPage(p) {

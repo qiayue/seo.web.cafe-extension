@@ -40,6 +40,7 @@
 
   chrome.runtime.onMessage.addListener(function (msg) {
     if (!msg || msg.type !== "trends:result" || !msg.requestId) return;
-    post({ type: "trends:result", requestId: msg.requestId, ok: !!msg.ok, data: msg.data || null, error: msg.error || "" });
+    // debug（耗时分段、有没有切到前台）一并带上，排查时在对话页里看得到；对话页交给服务器时不带它
+    post({ type: "trends:result", requestId: msg.requestId, ok: !!msg.ok, data: msg.data || null, error: msg.error || "", debug: msg.debug || null });
   });
 })();

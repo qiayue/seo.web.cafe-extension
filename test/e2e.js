@@ -10,8 +10,12 @@
 //
 // 钉住：① 对话页能认出插件，而且页面脚本同步执行时就认得出；② 请求 → 后台开谷歌趋势标签页 → 截到数据 → 送回对话页，数据完整；
 //       ③ 取完自动关掉那个标签页；④ 谷歌限流（429）或跳去人机验证页时马上送回原因，并把标签页留在前台让用户看见；
+//       ④c 后台叫不醒时 8 秒后切到前台、取到后切回；④d 用户自己开的谷歌趋势标签页一概不碰；
 //       ⑤ 不是 seo.web.cafe 发来的请求一律不接；⑥ 侧边栏页面能打开、没有脚本错误；
-//       ⑦ 侧边栏直接查谷歌趋势：曲线 / 统计 / 相关查询 / 原始 JSON 显示出来，可选取完不关标签页，失败说原因。
+//       ⑦ 侧边栏直接查谷歌趋势：曲线（没过完的点虚线）/ 统计 / 相关查询 / 原始 JSON，发现新的一波自动补查更细的，
+//          可选取完不关标签页，失败说原因。
+// 注意：无头 Chromium 不会像真浏览器那样冻结后台标签页，「叫醒」本身在这里测不出效果，只测它只作用于插件开的标签页；
+//       「后台不加载」用假站扣住曲线接口来模拟，测的是兜底（切前台 → 切回）。
 "use strict";
 const path = require("node:path");
 const os = require("node:os");
@@ -31,14 +35,30 @@ const XSSI = ")]}',\n";
 let failed = 0;
 const check = (name, cond, extra = "") => { console.log((cond ? "  ✓ " : "  ✕ ") + name + (extra ? "  " + extra : "")); if (!cond) failed++; };
 
-const TIMELINE = { default: { timelineData: Array.from({ length: 52 }, (_, i) => ({ time: String(1759017600 + i * 604800), value: [i < 40 ? 0 : (i - 39) * 8], hasData: [true] })) } };
+// 假数据按「现在」往回排（测试哪天跑都一样），形状照线上 jev：之前只有零星 1，最近冲起来，最后一个点没过完
+const NOW = Math.floor(Date.now() / 1000), DAY = 86400, WEEK = 7 * DAY;
+const weekStart = NOW - (NOW % WEEK);
+// 12 个月按周：53 个点，第 20 周有个 1 的小包，三周前那周起一波 20 → 45 → 80，没过完的这一周 100
+const WEEKLY = Array.from({ length: 53 }, (_, i) => Object.assign(
+  { time: String(weekStart - (52 - i) * WEEK), value: [i === 20 ? 1 : i >= 49 ? [20, 45, 80, 100][i - 49] : 0], hasData: [true] },
+  i === 52 ? { isPartial: true } : {}));
+// 30 天按天：线上 jev 实测的 31 个值，最后再加一个没过完的今天
+const JEV30 = require("./fixtures/jev-30d.json").points.map((p) => p.v).concat(70);
+const dayStart = NOW - (NOW % DAY);
+const DAILY = JEV30.map((v, i) => Object.assign({ time: String(dayStart - (JEV30.length - 1 - i) * DAY), value: [v], hasData: [true] },
+  i === JEV30.length - 1 ? { isPartial: true } : {}));
+const timeline = (date) => ({ default: { timelineData: /1-m|3-m|7-d/.test(date || "") ? DAILY : WEEKLY } });
 const RELATED = { default: { rankedList: [{ rankedKeyword: [{ query: "jev ai", value: 100, formattedValue: "100" }] }, { rankedKeyword: [{ query: "jev api", value: 4550, formattedValue: "Breakout" }] }] } };
 
 // 假的谷歌趋势探索页：和真页面一样，自己去请求两个接口（一个 fetch、一个 XHR，两种都要截得到）
+// 顺手报告：页面脚本跑起来时看到的网址、「是否可见」有没有被插件改过（只有插件开的标签页才该被改）
 const trendsPage = `<!doctype html><title>Google Trends (mock)</title><script>
-  var q = new URLSearchParams(location.search).get('q') || '';
+  var sp = new URLSearchParams(location.search);
+  var q = sp.get('q') || '';
+  var patched = !/native code/.test(Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get.toString());
+  fetch('/trends/probe?q=' + encodeURIComponent(q) + '&patched=' + patched + '&href=' + encodeURIComponent(location.href));
   var kw = { type: 'BROAD', value: q };
-  var multi = { time: 'x', resolution: 'WEEK', comparisonItem: [{ geo: {}, complexKeywordsRestriction: { keyword: [kw] } }] };
+  var multi = { time: sp.get('date') || '', resolution: 'WEEK', comparisonItem: [{ geo: {}, complexKeywordsRestriction: { keyword: [kw] } }] };
   var rel = { restriction: { geo: {}, complexKeywordsRestriction: { keyword: [kw] } }, keywordType: 'QUERY', metric: ['TOP', 'RISING'] };
   fetch('/trends/api/widgetdata/multiline?hl=en-US&req=' + encodeURIComponent(JSON.stringify(multi)) + '&token=t');
   setTimeout(function () {
@@ -73,6 +93,9 @@ function makeCert(dir) {
   } catch { return null; }
 }
 let throttle = false;
+const probes = {};
+// 「后台不加载」的谷歌趋势：词是 stall 时，曲线接口先不回，等测试看到那个标签页真切到了前台再放行
+const stalled = [];
 function handle(req, res) {
   const host = String(req.headers.host || "").split(":")[0];
   const u = new URL(req.url, "https://" + host);
@@ -82,8 +105,13 @@ function handle(req, res) {
       if (u.searchParams.get("q") === "captcha") { res.writeHead(302, { location: "https://www.google.com/sorry/index?continue=x" }); return res.end(); }
       return send(200, "text/html", trendsPage);
     }
+    if (u.pathname === "/trends/probe") { probes[u.searchParams.get("q")] = { patched: u.searchParams.get("patched") === "true", href: u.searchParams.get("href") }; return send(204, "text/plain", ""); }
     if (u.pathname.includes("/widgetdata/multiline")) {
-      return throttle ? send(429, "text/plain", "Too Many Requests") : send(200, "application/json", XSSI + JSON.stringify(TIMELINE));
+      const req = JSON.parse(u.searchParams.get("req") || "{}");
+      const kw = req.comparisonItem && req.comparisonItem[0].complexKeywordsRestriction.keyword[0].value;
+      const reply = () => (throttle ? send(429, "text/plain", "Too Many Requests") : send(200, "application/json", XSSI + JSON.stringify(timeline(req.time))));
+      if (kw === "stall") { stalled.push(reply); return; }
+      return reply();
     }
     if (u.pathname.includes("/widgetdata/relatedsearches")) return send(200, "application/json", XSSI + JSON.stringify(RELATED));
     return send(404, "text/plain", "");
@@ -134,7 +162,10 @@ function handle(req, res) {
     await chat.waitForFunction((id) => window.__results[id], ID1, { timeout: 20000 });
     const r1 = await chat.evaluate((id) => window.__results[id], ID1);
     check("数据送回对话页", r1.ok === true, r1.error || "");
-    check("曲线完整（52 周）、带上词", r1.data && r1.data.points.length === 52 && r1.data.keyword === "jev" && r1.data.points[45].v === 48);
+    check("曲线完整（53 周）、带上词", r1.data && r1.data.points.length === 53 && r1.data.keyword === "jev" && r1.data.points[50].v === 45);
+    check("没过完的这一周留着、标了出来（线上 jev 的 100 就在它上面）", r1.data && r1.data.points[52].v === 100 && r1.data.points[52].p === 1 && !r1.data.points[51].p);
+    const pj = probes.jev || {};
+    check("插件开的标签页：被「叫醒」（页面看到自己是可见的），网址里的记号已经抹掉", pj.patched === true && !/#/.test(pj.href || "x"), JSON.stringify(pj));
     check("相关查询也带回来了", r1.data && r1.data.rising[0] && r1.data.rising[0].q === "jev api" && r1.data.rising[0].v === "Breakout");
     await new Promise((r) => setTimeout(r, 800));
     const trendsTabs = context.pages().filter((p) => p.url().startsWith("https://trends.google.com/"));
@@ -164,6 +195,35 @@ function handle(req, res) {
     const sorry = context.pages().filter((p) => p.url().startsWith("https://www.google.com/sorry"));
     check("验证页留在前台，让用户去点", sorry.length === 1);
     for (const p of sorry) await p.close();
+
+    // ④c 后台叫不醒（谷歌趋势网页只在看得见时加载）：8 秒后切到前台让它加载，取到后切回对话页、关掉标签页
+    await chat.bringToFront();
+    const activeIds = () => sw.evaluate(() => chrome.tabs.query({ active: true }).then((ts) => ts.map((t) => ({ id: t.id, url: t.url || "" }))));
+    const before = await activeIds();
+    const ID4 = "e".repeat(32);
+    const t4 = Date.now();
+    await chat.evaluate((id) => window.__fetch(id, "stall"), ID4);
+    let released = false;
+    while (!released && Date.now() - t4 < 20000) {
+      await new Promise((r) => setTimeout(r, 300));
+      if ((await activeIds()).some((t) => t.url.startsWith("https://trends.google.com/"))) { released = true; while (stalled.length) stalled.shift()(); }
+    }
+    check("后台 8 秒没数据：把谷歌趋势标签页切到前台", released && Date.now() - t4 >= 7500, (Date.now() - t4) + "ms");
+    await chat.waitForFunction((id) => window.__results[id], ID4, { timeout: 15000 });
+    const r4 = await chat.evaluate((id) => window.__results[id], ID4);
+    await new Promise((r) => setTimeout(r, 800));
+    const after = await activeIds();
+    check("切到前台之后取到了数据", r4.ok === true && r4.data.points.length === 53 && r4.debug.foregroundMs >= 7500, JSON.stringify(r4.debug));
+    check("取完切回对话页、谷歌趋势标签页关掉", before.some((b) => after.some((a) => a.id === b.id)) && !after.some((a) => a.url.startsWith("https://trends.google.com/"))
+      && context.pages().filter((p) => p.url().startsWith("https://trends.google.com/")).length === 0, JSON.stringify({ before, after }));
+
+    // ④d 用户自己打开的谷歌趋势标签页：插件一个字节都不改
+    const own = await context.newPage();
+    await own.goto("https://trends.google.com/trends/explore?q=owntab");
+    await own.waitForFunction(() => true);
+    await new Promise((r) => setTimeout(r, 500));
+    check("用户自己开的谷歌趋势：不被「叫醒」", probes.owntab && probes.owntab.patched === false, JSON.stringify(probes.owntab));
+    await own.close();
 
     // ⑤ 别的网站冒充对话页：内容脚本根本不进那个站，请求石沉大海
     const evil = await context.newPage();
@@ -195,30 +255,42 @@ function handle(req, res) {
     const ask = async (kw) => {
       await panel.fill("#word", kw);
       await panel.click("#trendsGo");
-      await panel.waitForFunction(() => /\b(ok|err)\b/.test(document.getElementById("trendsStatus").className), null, { timeout: 20000 });
+      await panel.waitForFunction(() => /\b(ok|err)\b/.test(document.getElementById("trendsStatus").className), null, { timeout: 30000 });
       return {
         cls: await panel.getAttribute("#trendsStatus", "class"),
         status: await panel.textContent("#trendsStatus"),
-        raw: JSON.parse((await panel.textContent("#raw")) || "{}"),
+        cards: await panel.$$eval(".result", (els) => els.map((e) => ({
+          title: e.querySelector("h3").textContent,
+          full: (e.querySelector("polyline.full") || { getAttribute: () => "" }).getAttribute("points"),
+          partial: !!e.querySelector("polyline.partial"),
+          stats: (e.querySelector("dl") || { textContent: "" }).textContent,
+          rising: (e.querySelector(".rel ol") || { textContent: "" }).textContent,
+          link: (e.querySelector("dl a") || { href: "" }).href,
+          raw: JSON.parse((e.querySelector("pre") || { textContent: "{}" }).textContent),
+        }))),
       };
     };
     const a1 = await ask("jev");
     check("侧边栏查询：取到并显示", /\bok\b/.test(a1.cls), a1.status);
-    const pts = await panel.getAttribute("#chart polyline", "points");
-    check("画出曲线（52 个点）", (pts || "").trim().split(/\s+/).length === 52);
-    const risingText = await panel.textContent("#rising");
-    check("上升最快的相关查询显示出来", risingText.includes("jev api") && risingText.includes("Breakout"), risingText);
-    const stats = await panel.textContent("#stats");
-    check("统计：点数、第一次有热度、耗时、网页链接", /52 个/.test(stats) && /第一次有热度/.test(stats) && /耗时/.test(stats)
-      && (await panel.getAttribute("#stats a", "href") || "").startsWith("https://trends.google.com/trends/explore"), stats.replace(/\s+/g, " ").slice(0, 120));
-    check("原始 JSON 可看：数据 + 调试信息", a1.raw.ok === true && a1.raw.data.points.length === 52 && /^https:\/\/trends\.google\.com\//.test(a1.raw.debug.url) && a1.raw.debug.related === true);
+    const c1 = a1.cards[0] || {};
+    check("曲线：52 个过完的点实线，没过完的那一周画虚线", (c1.full || "").trim().split(/\s+/).length === 52 && c1.partial);
+    check("上升最快的相关查询显示出来", (c1.rising || "").includes("jev api") && c1.rising.includes("Breakout"), c1.rising);
+    check("统计：最高点标明没过完、认出最新一波、耗时分段、网页链接", /100（[^）]*还没过完/.test(c1.stats) && /最新一波.*之前最高只有 1/.test(c1.stats)
+      && /耗时.*页面加载完.*曲线到/.test(c1.stats) && c1.link.startsWith("https://trends.google.com/trends/explore"), (c1.stats || "").replace(/\s+/g, " ").slice(0, 200));
+    check("原始 JSON 可看：数据 + 调试信息", c1.raw.ok === true && c1.raw.data.points.length === 53 && /^https:\/\/trends\.google\.com\//.test(c1.raw.debug.url) && c1.raw.debug.related === true);
+    const c2 = a1.cards[1] || {};
+    check("新的一波三周前起来：自动再查过去 30 天（按天）", a1.cards.length === 2 && /过去 30 天/.test(c2.title) && /自动补查/.test(c2.title)
+      && c2.raw.data && c2.raw.data.points.length === 32 && /date=today%201-m/.test(c2.raw.debug.url), a1.cards.map((c) => c.title).join(" | "));
+    check("按天那张：最新一波落在 8 天前起来的那天（线上 jev 形状）", /最新一波/.test(c2.stats || ""), (c2.stats || "").replace(/\s+/g, " ").slice(0, 120));
+    check("状态行写明含自动补查", /含自动补查/.test(a1.status), a1.status);
     await new Promise((r) => setTimeout(r, 500));
-    check("默认取完关掉谷歌趋势标签页", trendsTabs2().length === 0);
+    check("默认取完关掉谷歌趋势标签页（两次都关）", trendsTabs2().length === 0);
 
+    await panel.uncheck("#autoFiner");
     await panel.check("#keepTab");
     const a2 = await ask("jev");
     await new Promise((r) => setTimeout(r, 500));
-    check("勾了「取完不关」：标签页留着对照", /\bok\b/.test(a2.cls) && trendsTabs2().length === 1);
+    check("关掉自动补查只查一次；勾了「取完不关」标签页留着对照", /\bok\b/.test(a2.cls) && a2.cards.length === 1 && trendsTabs2().length === 1);
     for (const p of trendsTabs2()) await p.close();
     await panel.uncheck("#keepTab");
 
