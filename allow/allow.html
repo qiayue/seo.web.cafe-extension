@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>允许读 Ahrefs 数据 · 哥飞 SEO Agent</title>
+  <title>允许插件读网页 · 哥飞 SEO Agent</title>
   <link rel="stylesheet" href="../sidepanel/sidepanel.css">
   <style>
     body { max-width: 560px; margin: 40px auto; }
@@ -15,13 +15,27 @@
 </head>
 <body>
   <section>
-    <h1>让 Agent 读你的 Ahrefs</h1>
-    <p>对话里的 Agent 要看 <b id="target"></b> 的外链和流量增长。插件会用你登录的 Ahrefs（<b id="host"></b>）打开这个站的 Site Explorer，把页面上的曲线和指标读回来交给 Agent。</p>
-    <ul>
-      <li>读到的只交给你自己的对话，不进网站的共享缓存。</li>
-      <li>只在插件自己打开的标签页里读，读完就关；你自己打开的 Ahrefs 标签页一概不碰。</li>
-      <li>Chrome 会问一次；以后随时可以在 chrome://extensions 里收回。</li>
-    </ul>
+    <div id="forAhrefs">
+      <h1>让 Agent 读你的 Ahrefs</h1>
+      <p>对话里的 Agent 要看 <b class="target"></b> 的外链和流量增长。插件会用你登录的 Ahrefs（<b class="host"></b>）打开这个站的 Site Explorer，把页面上的曲线和指标读回来交给 Agent。</p>
+      <ul>
+        <li>读到的只交给你自己的对话，不进网站的共享缓存。</li>
+        <li>只在插件自己打开的标签页里读，读完就关；你自己打开的 Ahrefs 标签页一概不碰。</li>
+        <li>Chrome 会问一次；以后随时可以在 chrome://extensions 里收回。</li>
+      </ul>
+    </div>
+    <div id="forPage" hidden>
+      <h1>让 Agent 用你的浏览器打开这个网页</h1>
+      <p>网站那边抓不到这个网页（跳转太多、被拦、要登录，或者要执行 JS 才有内容）。插件会在后台打开</p>
+      <p><b class="target" style="word-break:break-all"></b></p>
+      <p>等页面加载完，把页面上的文字、标题、链接读回来交给 Agent，读完关掉。</p>
+      <ul>
+        <li>是用你的浏览器打开的：<b>你在 <span class="host"></span> 登录后能看到的内容，它也读得到</b>——不认识的网站、不想让它看的页面，点「不允许」。</li>
+        <li>读到的只交给你自己的对话，不进网站的共享缓存。</li>
+        <li>Chrome 会问一次（只针对 <span class="host"></span>）；以后随时可以在 chrome://extensions 里收回。</li>
+      </ul>
+      <label class="check"><input type="checkbox" id="allSites"> 所有网站都允许（以后 Agent 要打开别的网站也不再问——只在你信得过这个用法时勾）</label>
+    </div>
     <button type="button" class="primary" id="allow">允许读 Ahrefs 数据</button>
     <button type="button" id="deny">不允许（这次不读 Ahrefs）</button>
     <p id="status" class="status" hidden></p>

@@ -91,6 +91,9 @@ const chatPage = `<!doctype html><title>chat (mock)</title><script>
   });
   window.__cancel = function (id) { window.postMessage({ source: 'gefei-seo-page', type: 'trends:cancel', requestId: id }, location.origin); };
   window.postMessage({ source: 'gefei-seo-page', type: 'ping' }, location.origin);
+  window.__page = function (id, url) {
+    window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'page', requestId: id, url: url }, location.origin);
+  };
   window.__ahrefs = function (id, target) {
     window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'ahrefs', requestId: id, target: target }, location.origin);
   };
@@ -113,6 +116,16 @@ const ahrefsPage = `<!doctype html><title>Site Explorer (mock)</title><main id="
   });
   setTimeout(function () { var x = new XMLHttpRequest(); x.open('GET', '/v4/seHistory?target=' + t); x.send(); }, 300);
 </script>`;
+
+// 假的「服务器抓不到」的网页：内容是页面脚本跑起来之后才画出来的（服务器那边不执行 JS，只拿到一个空壳）
+const jsApp = `<!doctype html><html lang="en"><head><title>JS App</title><meta name="description" content="rendered by js"></head><body><div id="root"></div><script>
+  setTimeout(function () {
+    document.getElementById('root').innerHTML = '<main><h1>Hello from JS</h1><h2>Section ' + (location.hash || 'none') + '</h2><p>' + 'rendered text '.repeat(40) + '</p>' +
+      '<table><tr><th>词根</th><th>热度</th></tr><tr><td>generator</td><td>100</td></tr></table><a href="https://x.example/doc">外部文档</a></main>';
+  }, 600);
+</script></body></html>`;
+const loginPage = "<!doctype html><title>Sign in</title><main><h1>Sign in</h1><form><input type=email><input type=password></form></main>";
+const canvasPage = "<!doctype html><title>Sheet</title><body style=margin:0><div>表格 1</div><canvas width=1200 height=900 style='width:100vw;height:100vh'></canvas></body>";
 
 // 本机假站：按 Host 分发。证书现生成（自签，浏览器那边用 --ignore-certificate-errors 放行），不进仓库
 function makeCert(dir) {
@@ -158,6 +171,14 @@ function handle(req, res) {
     return send(200, "text/html", "<title>Ahrefs (mock)</title>ahrefs");
   }
   if (host === "shop.example") return send(200, "text/html", "<title>Shop " + u.pathname + "</title>shop");
+  if (host === "js.example") {
+    if (u.pathname === "/app") return send(200, "text/html", jsApp);
+    if (u.pathname === "/login") return send(200, "text/html", loginPage);
+    if (u.pathname === "/sheet") return send(200, "text/html", canvasPage);
+    if (u.pathname === "/away") { res.writeHead(302, { location: "https://other.example/landing" }); return res.end(); }
+    return send(404, "text/plain", "");
+  }
+  if (host === "other.example") return send(200, "text/html", "<title>Other</title><main>other site</main>");
   if (host === "seo.web.cafe" || host === "evil.example") {
     if (u.pathname === "/extension/version.json") return send(200, "application/json", JSON.stringify({ version: MANIFEST.version }));
     return send(200, "text/html", chatPage);
@@ -165,7 +186,7 @@ function handle(req, res) {
   send(404, "text/plain", "");
 }
 
-const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.example", "app.ahrefs.com", "ahrefs.3ue.com", "shop.example"];
+const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.example", "app.ahrefs.com", "ahrefs.3ue.com", "shop.example", "js.example", "other.example"];
 
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gefei-ext-"));
@@ -445,11 +466,11 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     await chat.evaluate((id) => window.__ahrefs(id, "pollo.ai"), IDN);
     for (let i = 0; i < 30 && !allowPages().length; i++) await new Promise((r) => setTimeout(r, 100));
     const allow = allowPages()[0];
-    if (allow) await allow.waitForFunction(() => /ahrefs/.test(document.getElementById("host").textContent), null, { timeout: 5000 }).catch(() => {});
+    if (allow) await allow.waitForFunction(() => /ahrefs/.test(document.querySelector(".host").textContent), null, { timeout: 5000 }).catch(() => {});
     await chat.waitForFunction((id) => window.__accepted[id], IDN, { timeout: 5000 }).catch(() => {});
     const rn0 = await chat.evaluate((id) => ({ acc: !!window.__accepted[id], res: window.__results[id] || null }), IDN);
     check("读 Ahrefs、还没允许：接单，打开「允许读 ahrefs.3ue.com 的数据」页面等你点，不马上说失败", !!allow && rn0.acc && !rn0.res
-      && /允许读 ahrefs\.3ue\.com 的数据/.test(await allow.textContent("#allow")) && /pollo\.ai/.test(await allow.textContent("#target")));
+      && /允许读 ahrefs\.3ue\.com 的数据/.test(await allow.textContent("#allow")) && /pollo\.ai/.test(await allow.textContent("#forAhrefs .target")) && await allow.isHidden("#forPage"));
     await allow.click("#deny", { noWaitAfter: true }).catch(() => {}); // 点了后台马上关掉这一页：别等点击「收尾」
     await chat.waitForFunction((id) => window.__results[id], IDN, { timeout: 10000 }).catch(() => {});
     const rn = await chat.evaluate((id) => window.__results[id] || null, IDN);
@@ -474,6 +495,25 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     check("等「允许」时点了停止：关掉「允许」页面、单子作废", rs && rs.ok === false && /点了停止/.test(rs.error) && allowPages().length === 0, rs && rs.error);
     // 点「允许」之后 Chrome 会弹一次权限确认——无头浏览器里点不到那个弹窗，「允许之后接着读」放到下面 ⑪（那边的插件拷贝已有权限）里测
 
+    // 用浏览器打开网页：这个网站还没允许 → 打开「允许」页面（写明是哪个网址、登录后的内容也读得到），点「不允许」就不开
+    const IDP = "5".repeat(32);
+    await chat.evaluate((id) => window.__page(id, "https://js.example/app"), IDP);
+    for (let i = 0; i < 30 && !allowPages().length; i++) await new Promise((r) => setTimeout(r, 100));
+    const allowP = allowPages()[0];
+    if (allowP) await allowP.waitForFunction(() => /js\.example/.test(document.getElementById("allow").textContent), null, { timeout: 5000 }).catch(() => {});
+    const pageAllowText = allowP ? await allowP.evaluate(() => ({ btn: document.getElementById("allow").textContent, page: !document.getElementById("forPage").hidden, body: document.body.innerText })) : null;
+    check("打开网页、这个网站还没允许：打开「允许打开并读 js.example」页面，写明网址、提醒登录后的内容也读得到，有「所有网站都允许」可选", pageAllowText && pageAllowText.page
+      && /允许打开并读 js\.example/.test(pageAllowText.btn) && /https:\/\/js\.example\/app/.test(pageAllowText.body) && /登录后能看到的内容，它也读得到/.test(pageAllowText.body) && /所有网站都允许/.test(pageAllowText.body), pageAllowText && pageAllowText.btn);
+    if (allowP) await allowP.click("#deny", { noWaitAfter: true }).catch(() => {});
+    await chat.waitForFunction((id) => window.__results[id], IDP, { timeout: 10000 }).catch(() => {});
+    const rp = await chat.evaluate((id) => window.__results[id] || null, IDP);
+    check("点「不允许」：这次不打开，说清楚", rp && rp.ok === false && /没允许插件读 js\.example 的页面（你点了「不允许」），这次没读这个网页/.test(rp.error), rp && rp.error);
+    const IDL0 = "4".repeat(32);
+    await chat.evaluate((id) => window.__page(id, "http://192.168.1.1/admin"), IDL0);
+    await chat.waitForFunction((id) => window.__results[id], IDL0, { timeout: 10000 }).catch(() => {});
+    const rl0 = await chat.evaluate((id) => window.__results[id] || null, IDL0);
+    check("局域网 / 本机的网址：插件不开", rl0 && rl0.ok === false && /本机和局域网的不开/.test(rl0.error) && allowPages().length === 0, rl0 && rl0.error);
+
     // 对话页请插件对比（Agent 调 google_trends 带 compare）
     const IDC = "c".repeat(32);
     await chat.evaluate((id) => window.__fetch(id, "jev,gpts,sora"), IDC);
@@ -491,6 +531,7 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     mf.permissions.push("tabs");
     delete mf.optional_permissions;
     mf.host_permissions.push("https://app.ahrefs.com/*", "https://ahrefs.3ue.com/*"); // 等于在侧边栏点过「允许读 Ahrefs 数据」
+    mf.host_permissions.push("https://js.example/*"); // 等于在「允许」页面点过允许打开 js.example
     fs.writeFileSync(path.join(extCopy, "manifest.json"), JSON.stringify(mf));
     const ctx2 = await playwright.chromium.launchPersistentContext(path.join(tmp, "profile2"), {
       channel: "chromium", ignoreHTTPSErrors: true,
@@ -570,6 +611,28 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       const rw = await chat2.evaluate((id) => window.__results[id] || null, IDW);
       const fakeGone = await sw2.evaluate((id) => chrome.tabs.get(id).then(() => false, () => true), fakeAllow);
       check("允许之后：关掉「允许」页面、接着去 Ahrefs 读，结果交回对话页", fakeGone && rw && rw.ok && rw.data.series.length === 3, rw && (rw.error || rw.data.series.length));
+
+      // ⑫ 用浏览器打开网页读回来（允许过 js.example）：页面脚本画出来的内容也读得到；# 后面的留着；读完关掉
+      const readPage = async (id, url) => {
+        await chat2.evaluate(([i, u]) => window.__page(i, u), [id, url]);
+        await chat2.waitForFunction((i) => window.__results[i], id, { timeout: 40000 }).catch(() => {});
+        return chat2.evaluate((i) => window.__results[i] || null, id);
+      };
+      const pageTabs = () => ctx2.pages().filter((p) => /js\.example|other\.example/.test(p.url()));
+      const p1 = await readPage("1".repeat(32), "https://js.example/app#/pricing");
+      check("打开网页：页面脚本画出来的正文、标题层级、表格、链接都读到（服务器那边只能拿到空壳）", p1 && p1.ok && /Hello from JS/.test(p1.data.text) && p1.data.textChars > 400
+        && p1.data.headings.includes("h1 Hello from JS") && p1.data.tables[0][1].join() === "generator,100" && p1.data.links.some((l) => l.href === "https://x.example/doc"), p1 && (p1.error || p1.data.text.slice(0, 80)));
+      check("网页：标题、描述、语言、渲染后的 HTML；# 后面的原样带上（单页应用靠它分页面）", p1 && p1.ok && p1.data.title === "JS App" && p1.data.description === "rendered by js" && p1.data.lang === "en"
+        && /Section #\/pricing/.test(p1.data.text) && /<h1>Hello from JS<\/h1>/.test(p1.data.html) && p1.data.finalUrl === "https://js.example/app#/pricing");
+      await new Promise((r) => setTimeout(r, 400));
+      check("读完关掉那个标签页", pageTabs().length === 0, pageTabs().map((p) => p.url()).join());
+      const p2 = await readPage("2".repeat(32), "https://js.example/login");
+      check("要登录的页面：读回来并标明要登录（Agent 会请你先在浏览器里登录）", p2 && p2.ok && p2.data.login === true, p2 && (p2.error || JSON.stringify(p2.data.login)));
+      const p3 = await readPage("3".repeat(32), "https://js.example/sheet");
+      check("在线表格（内容画在 canvas 上）：标明读不出文字", p3 && p3.ok && p3.data.canvas === true, p3 && (p3.error || JSON.stringify(p3.data.canvas)));
+      const p4 = await readPage("0".repeat(32), "https://js.example/away");
+      check("跳到了没被允许读的网站：说清楚，不硬读", p4 && p4.ok === false && /跳到了插件没被允许读的网址/.test(p4.error), p4 && p4.error);
+      for (const p of pageTabs()) await p.close();
 
       // 镜像站：在设置里换地址，读数据照样走（侧边栏调试按钮，不经过 Agent）
       await panel2.fill("#ahrefsBase", "https://ahrefs.3ue.com/dashboard");

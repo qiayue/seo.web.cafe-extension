@@ -27,8 +27,8 @@ check("「读取标签页网址」（tabs）只作可选权限：用户在侧边
   assert.deepEqual(m.optional_permissions, ["tabs"]);
   assert.ok(!m.permissions.includes("tabs"));
 });
-check("读 Ahrefs 的站点权限是可选的（https 任意站，运行时只申请你设置的那一个 Ahrefs 地址），装的时候不多问", () => {
-  assert.deepEqual(m.optional_host_permissions, ["https://*/*"]);
+check("读 Ahrefs / 打开网页的站点权限都是可选的（运行时只申请要读的那一个网站；勾了「所有网站都允许」才要全部），装的时候不多问", () => {
+  assert.deepEqual(m.optional_host_permissions, ["https://*/*", "http://*/*"]);
   assert.ok(!m.host_permissions.some((h) => /ahrefs/.test(h)));
 });
 check("Ahrefs 的脚本不写死在 manifest 里（允许之后由后台按设置的地址注册），但文件都在", () => {
@@ -66,7 +66,7 @@ check("引用到的文件都在", () => {
 check("后台用 importScripts 引的文件也在", () => {
   const bg = fs.readFileSync(path.join(ROOT, "background.js"), "utf8");
   const imported = [...bg.matchAll(/importScripts\(([^)]*)\)/g)].flatMap((x) => [...x[1].matchAll(/"([^"]+)"/g)].map((y) => y[1]));
-  assert.ok(imported.includes("lib/trends-parse.js") && imported.includes("lib/ahrefs-parse.js"), imported.join());
+  assert.ok(imported.includes("lib/trends-parse.js") && imported.includes("lib/ahrefs-parse.js") && imported.includes("lib/page-read.js"), imported.join());
   assert.deepEqual(imported.filter((f) => !exists(f)), []);
 });
 check("根目录没有下划线开头的文件（Chrome 保留，会拒绝加载）", () => {
