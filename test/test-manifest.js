@@ -17,8 +17,8 @@ const exists = (p) => fs.existsSync(path.join(ROOT, p));
 
 check("MV3", () => assert.equal(m.manifest_version, 3));
 check("版本号是三段数字（侧边栏拿它和网站上的最新版比）", () => assert.match(m.version, /^\d+\.\d+\.\d+$/));
-check("权限只有这三个：侧边栏、存进行中的取数任务、点图标时读当前网页", () => {
-  assert.deepEqual([...m.permissions].sort(), ["activeTab", "sidePanel", "storage"]);
+check("权限只有这四个：侧边栏、存进行中的取数任务、点图标时读当前网页、插件更新后把传话脚本补进已打开的对话页", () => {
+  assert.deepEqual([...m.permissions].sort(), ["activeTab", "scripting", "sidePanel", "storage"]);
 });
 check("不申请 tabs / 全部网站 / 历史记录这类大权限", () => {
   assert.ok(!m.permissions.includes("tabs") && !m.permissions.includes("history"));
@@ -27,9 +27,10 @@ check("「读取标签页网址」（tabs）只作可选权限：用户在侧边
   assert.deepEqual(m.optional_permissions, ["tabs"]);
   assert.ok(!m.permissions.includes("tabs"));
 });
-check("站点权限只有谷歌趋势一个（看得到取数标签页的网址，才分得清它是不是被跳去了人机验证页）", () => {
-  // 内容脚本的 matches 不算站点权限：只有它的话，后台读 tab.url 永远是空的，每个取数标签页都会被当成「被跳走了」
-  assert.deepEqual(m.host_permissions, ["https://trends.google.com/*"]);
+check("站点权限只有两个站：谷歌趋势（看得到取数标签页的网址）、seo.web.cafe（插件更新后把传话脚本补进已打开的对话页）", () => {
+  // 内容脚本的 matches 不算站点权限：只有它的话，后台读 tab.url 永远是空的，每个取数标签页都会被当成「被跳走了」；
+  // 也没法往已经打开的对话页里补脚本。这两个站本来就在内容脚本里，安装时不会多出新的权限提示
+  assert.deepEqual([...m.host_permissions].sort(), ["https://seo.web.cafe/*", "https://trends.google.com/*"]);
 });
 check("内容脚本只进两个站：seo.web.cafe 与 trends.google.com", () => {
   const sites = new Set(m.content_scripts.flatMap((c) => c.matches));

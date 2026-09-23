@@ -13,6 +13,7 @@
 //       ④c 后台叫不醒时 8 秒后切到前台、取到后切回；④d 用户自己开的谷歌趋势标签页一概不碰；
 //       ⑤ 不是 seo.web.cafe 发来的请求一律不接；⑥ 侧边栏页面能打开、没有脚本错误；
 //       ⑥b Ahrefs 按钮（官方 / 镜像站地址可配）；⑧ 授权后自动跟随当前网页（手动填过的不覆盖）；
+//       ⑨ 插件重新加载后不用刷新对话页：新脚本补进页面、旧脚本不抢着回失败、照常取到；
 //       ⑦ 侧边栏直接查谷歌趋势：曲线（没过完的点虚线）/ 统计 / 相关查询 / 原始 JSON，发现新的一波自动补查更细的，
 //          可选取完不关标签页，失败说原因。
 // 注意：无头 Chromium 不会像真浏览器那样冻结后台标签页，「叫醒」本身在这里测不出效果，只测它只作用于插件开的标签页；
@@ -73,11 +74,12 @@ const trendsPage = `<!doctype html><title>Google Trends (mock)</title><script>
 // __syncSeen：页面脚本一开始执行就能不能认出插件（最早的时刻）——真对话页 /chat/?q=… 的自动发问不管排在什么时候都不用赌时序
 const chatPage = `<!doctype html><title>chat (mock)</title><script>
   window.__syncSeen = document.documentElement.getAttribute('data-gefei-seo-ext');
-  window.__hello = null; window.__results = {}; window.__accepted = {}; window.__progress = {};
+  window.__hello = null; window.__helloCount = 0; window.__results = {}; window.__accepted = {}; window.__progress = {}; window.__stale = {};
   window.addEventListener('message', function (e) {
     if (e.source !== window || !e.data || e.data.source !== 'gefei-seo-ext') return;
     var d = e.data;
-    if (d.type === 'hello') window.__hello = d;
+    if (d.type === 'hello') { window.__hello = d; window.__helloCount++; }
+    if (d.type === 'trends:stale') window.__stale[d.requestId] = true;
     if (d.type === 'trends:result') window.__results[d.requestId] = Object.assign({ acceptedFirst: !!window.__accepted[d.requestId] }, d);
     if (d.type === 'trends:accepted') window.__accepted[d.requestId] = Date.now();
     if (d.type === 'trends:progress') (window.__progress[d.requestId] = window.__progress[d.requestId] || []).push(d.stage);
@@ -141,6 +143,9 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const port = server.address().port;
   const userDir = path.join(tmp, "profile");
+  // 开着「开发者模式」（本地加载插件的用户都开着）：关着的话，Chrome 会把重新加载过的未打包插件直接停用，⑨ 就测不了
+  fs.mkdirSync(path.join(userDir, "Default"), { recursive: true });
+  fs.writeFileSync(path.join(userDir, "Default", "Preferences"), JSON.stringify({ extensions: { ui: { developer_mode: true } } }));
   const context = await playwright.chromium.launchPersistentContext(userDir, {
     channel: "chromium", // 新版无头模式才支持插件
     ignoreHTTPSErrors: true,
@@ -362,6 +367,28 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     await panel.click("#trendsGo");
     check("地区写错：当场提示，不去开谷歌趋势", /两位国家码/.test(await panel.textContent("#trendsStatus")) && trendsTabs2().length === 0);
     await panel.fill("#geo", "");
+
+    // ⑨ 插件更新 / 重新加载（用户在 chrome://extensions 点了刷新）：已经打开的对话页不用刷新——
+    //    新插件把传话脚本补进页面（hello 再来一次），页面里失效的旧脚本只说「我失效了」、不抢着回失败，新脚本接单、照常取到
+    await chat.bringToFront();
+    const helloBefore = await chat.evaluate(() => window.__helloCount);
+    await sw.evaluate(() => chrome.runtime.reload()).catch(() => {});
+    await chat.waitForFunction((n) => window.__helloCount > n, helloBefore, { timeout: 10000 }).catch(() => {});
+    await chat.waitForTimeout(1500);
+    const helloAfter = await chat.evaluate(() => window.__helloCount);
+    check("插件重新加载后：新插件把传话脚本补进已打开的对话页（又收到 hello），而且只补一份", helloAfter === helloBefore + 1, helloBefore + " → " + helloAfter);
+    const ID9 = "9".repeat(32);
+    await chat.evaluate((id) => window.__fetch(id, "jev"), ID9);
+    await chat.waitForFunction((id) => window.__results[id], ID9, { timeout: 20000 }).catch(() => {});
+    const r9 = await chat.evaluate((id) => ({ res: window.__results[id] || null, stale: !!window.__stale[id], accepted: !!window.__accepted[id] }), ID9);
+    check("页面里失效的旧脚本只说「我失效了」，不抢着回失败", r9.stale === true && !(r9.res && r9.res.ok === false), JSON.stringify(r9.res && { ok: r9.res.ok, error: r9.res.error }));
+    check("补进来的新脚本接单、照常取到数据——不用刷新对话页", r9.accepted && r9.res && r9.res.ok === true && r9.res.data.points.length === 53);
+    // 后台闲置被回收、再起来时也会挨个问一遍：页面里的传话脚本活着，就不再补
+    const swNew = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker", { timeout: 10000 });
+    const h0 = await chat.evaluate(() => window.__helloCount);
+    await swNew.evaluate(() => ensureBridges());
+    await chat.waitForTimeout(1000);
+    check("后台再起来：传话脚本活着就不重复补", (await chat.evaluate(() => window.__helloCount)) === h0);
     await context.close();
 
     // ⑧ 自动跟随当前网页：要用户授权可选权限 tabs——无头浏览器点不了授权弹窗，

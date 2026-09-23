@@ -251,6 +251,24 @@ chrome.tabs.onUpdated.addListener(function (tabId, info, tab) {
   });
 });
 
+// ---------- 插件装好 / 更新 / 重新加载：把传话脚本补进已经打开的 seo.web.cafe 页面 ----------
+// Chrome 不会把内容脚本塞进已经打开的页面：插件一更新，对话页里那份旧脚本就失效了，新的又进不来，
+// 这一轮就当「没装插件」。所以后台每次起来（装好、更新、重新加载，以及被回收后重启）都挨个问一声对话页里的传话脚本：
+// 回不上话的（失效的旧脚本回不了，也可能压根没有）就补一份进去。页面马上收到 hello、报给服务器，
+// 服务器那边等插件的工具就接着干活，不用用户刷新。活着的不重复补
+function ensureBridges() {
+  chrome.tabs.query({ url: "https://seo.web.cafe/*" }).then(function (tabs) {
+    tabs.forEach(function (t) {
+      chrome.tabs.sendMessage(t.id, { type: "bridge:ping" }).then(function (r) {
+        if (!r || !r.ok) throw new Error("no bridge");
+      }).catch(function () {
+        chrome.scripting.executeScript({ target: { tabId: t.id }, files: ["content/site-bridge.js"] }).catch(function () {});
+      });
+    });
+  }, function () {});
+}
+ensureBridges(); // 后台脚本每次起来都跑一遍（装好 / 更新 / 重新加载都会让它起来）；不另挂 onInstalled，免得同一刻补两份
+
 // ---------- 点插件图标：记下当前网页，打开侧边栏 ----------
 // 不用 openPanelOnActionClick：自己处理点击，点击这一下会授予 activeTab，才读得到当前网页的网址；
 // 这样不用申请「读取所有网页的浏览记录」那种大权限
