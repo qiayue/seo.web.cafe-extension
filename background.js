@@ -5,6 +5,7 @@
 //      打开谷歌趋势 → 那个页面里的 content/trends-hook.js 截下它自己拿到的数据、trends-bridge.js 交回来 →
 //      送回对话页、关掉标签页。取不到（要人机验证 / 被限流 / 超时）就把原因送回去，并把标签页切到前台让用户看见。
 //   ② 点插件图标：记下当前网页、打开侧边栏（侧边栏里一键问 Agent「这个站流量怎么起来的」）。
+//   ③ 侧边栏自己也能发起取数（单独调试用，不经过 Agent）：走同一条取数路，结果送回侧边栏显示，不进网站缓存。
 //
 // MV3 的 service worker 随时可能被浏览器回收：进行中的取数任务存在 chrome.storage.session 里，不放内存。
 // 超时用 setTimeout，worker 被回收就丢了——对话页那边自己也有 60 秒的超时兜底，不会干等。
@@ -25,14 +26,20 @@ function serial(fn) {
 function loadJobs() { return chrome.storage.session.get("jobs").then(function (r) { return r.jobs || {}; }); }
 function saveJobs(jobs) { return chrome.storage.session.set({ jobs: jobs }); }
 
-function startJob(msg, origin) {
+/** from：{ tab }（seo.web.cafe 对话页，结果送回那个标签页）或 { panel, tab?, windowId? }（插件侧边栏，结果广播给插件页面） */
+function startJob(msg, from) {
   return serial(function () {
     if (!/^[a-f0-9]{32}$/.test(String(msg.requestId || ""))) throw new Error("取数单号不对");
     var url = P.buildTrendsUrl({ keyword: msg.keyword, geo: msg.geo, date: msg.date });
-    return chrome.tabs.create({ url: url, active: false, windowId: origin.windowId, index: origin.index + 1 }).then(function (tab) {
+    var opts = { url: url, active: false };
+    if (from.tab) { opts.windowId = from.tab.windowId; opts.index = from.tab.index + 1; }
+    else if (Number.isInteger(msg.windowId)) opts.windowId = msg.windowId;
+    return chrome.tabs.create(opts).then(function (tab) {
       return loadJobs().then(function (jobs) {
         jobs[tab.id] = {
-          requestId: msg.requestId, originTabId: origin.id,
+          requestId: msg.requestId, url: url,
+          originTabId: from.panel ? null : from.tab.id, toPanel: !!from.panel,
+          keepTab: !!(from.panel && msg.keepTab), // 调试用：取完不关，方便对照网页核对
           keyword: String(msg.keyword || "").replace(/\s+/g, " ").trim().toLowerCase(),
           startedAt: Date.now(), points: null, top: null, rising: null,
         };
@@ -54,9 +61,13 @@ function finish(tabId, result, reveal) {
       if (!job) return;
       delete jobs[tabId];
       return saveJobs(jobs).then(function () {
-        var msg = { type: "trends:result", requestId: job.requestId, ok: !!result.ok, data: result.data || null, error: result.error || "" };
-        chrome.tabs.sendMessage(job.originTabId, msg).catch(function () {});
-        if (result.ok) chrome.tabs.remove(tabId).catch(function () {});
+        var msg = { type: "trends:result", requestId: job.requestId, ok: !!result.ok, data: result.data || null, error: result.error || "",
+          // 给侧边栏调试看的：打开的网址、耗时、相关查询到没到（对话页那边用不上，传过去也不碍事）
+          debug: { url: job.url, ms: Date.now() - job.startedAt, related: job.rising !== null } };
+        if (job.toPanel) chrome.runtime.sendMessage(msg).catch(function () {}); // 侧边栏关了就没人收，无所谓
+        else chrome.tabs.sendMessage(job.originTabId, msg).catch(function () {});
+        if (result.ok && job.keepTab) chrome.tabs.update(tabId, { active: true }).catch(function () {});
+        else if (result.ok) chrome.tabs.remove(tabId).catch(function () {});
         else if (reveal) chrome.tabs.update(tabId, { active: true }).catch(function () {});
       });
     });
@@ -96,15 +107,21 @@ function onCaptured(tabId, msg) {
   });
 }
 
+var PANEL_URL = chrome.runtime.getURL("sidepanel/");
+
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || !sender || !sender.tab) return false;
+  if (!msg || !sender) return false;
   if (msg.type === "trends:fetch") {
-    // 只接 seo.web.cafe 页面里发来的取数请求
-    if (sender.origin !== SITE_ORIGIN) { sendResponse({ ok: false, error: "只接受 seo.web.cafe 发起的取数" }); return false; }
-    startJob(msg, sender.tab).then(function () { sendResponse({ ok: true }); }, function (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); });
+    // 只接两处发来的取数请求：插件自己的侧边栏；seo.web.cafe 页面（经 content/site-bridge.js）。
+    // 内容脚本的 sender.id 也是本插件，所以侧边栏按页面网址认，不按 id 认
+    var fromPanel = sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0;
+    var fromSite = !fromPanel && !!sender.tab && sender.origin === SITE_ORIGIN;
+    if (!fromPanel && !fromSite) { sendResponse({ ok: false, error: "只接受 seo.web.cafe 或插件侧边栏发起的取数" }); return false; }
+    startJob(msg, fromPanel ? { panel: true, tab: sender.tab || null } : { tab: sender.tab })
+      .then(function () { sendResponse({ ok: true }); }, function (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); });
     return true; // 异步回话
   }
-  if (msg.type === "trends:captured") { onCaptured(sender.tab.id, msg); return false; }
+  if (msg.type === "trends:captured" && sender.tab) { onCaptured(sender.tab.id, msg); return false; }
   return false;
 });
 

@@ -10,7 +10,8 @@
 //
 // 钉住：① 对话页能认出插件，而且页面脚本同步执行时就认得出；② 请求 → 后台开谷歌趋势标签页 → 截到数据 → 送回对话页，数据完整；
 //       ③ 取完自动关掉那个标签页；④ 谷歌限流（429）或跳去人机验证页时马上送回原因，并把标签页留在前台让用户看见；
-//       ⑤ 不是 seo.web.cafe 发来的请求一律不接；⑥ 侧边栏页面能打开、没有脚本错误。
+//       ⑤ 不是 seo.web.cafe 发来的请求一律不接；⑥ 侧边栏页面能打开、没有脚本错误；
+//       ⑦ 侧边栏直接查谷歌趋势：曲线 / 统计 / 相关查询 / 原始 JSON 显示出来，可选取完不关标签页，失败说原因。
 "use strict";
 const path = require("node:path");
 const os = require("node:os");
@@ -25,6 +26,7 @@ for (const p of ["playwright", process.env.PLAYWRIGHT_MODULE, "/opt/node22/lib/n
 if (!playwright) { console.log("跳过：没装 Playwright（npm i -D playwright 后再跑）"); process.exit(0); }
 
 const EXT = path.join(__dirname, "..");
+const MANIFEST = JSON.parse(fs.readFileSync(path.join(EXT, "manifest.json"), "utf8"));
 const XSSI = ")]}',\n";
 let failed = 0;
 const check = (name, cond, extra = "") => { console.log((cond ? "  ✓ " : "  ✕ ") + name + (extra ? "  " + extra : "")); if (!cond) failed++; };
@@ -88,7 +90,7 @@ function handle(req, res) {
   }
   if (host === "www.google.com") return send(200, "text/html", "<title>unusual traffic</title>人机验证");
   if (host === "seo.web.cafe" || host === "evil.example") {
-    if (u.pathname === "/extension/version.json") return send(200, "application/json", '{"version":"0.1.0"}');
+    if (u.pathname === "/extension/version.json") return send(200, "application/json", JSON.stringify({ version: MANIFEST.version }));
     return send(200, "text/html", chatPage);
   }
   send(404, "text/plain", "");
@@ -186,6 +188,51 @@ function handle(req, res) {
     await chatTab.waitForLoadState();
     const q = new URL(chatTab.url()).searchParams.get("q");
     check("「这个站流量怎么起来的」→ 打开对话页并带上问题（去掉 www）", q === "imagedetector.com 这个站流量怎么起来的？", q);
+    await chatTab.close();
+
+    // ⑦ 侧边栏直接查谷歌趋势（单独调试用，不经过 Agent）：同一条取数路，结果显示在侧边栏
+    const trendsTabs2 = () => context.pages().filter((p) => p.url().startsWith("https://trends.google.com/"));
+    const ask = async (kw) => {
+      await panel.fill("#word", kw);
+      await panel.click("#trendsGo");
+      await panel.waitForFunction(() => /\b(ok|err)\b/.test(document.getElementById("trendsStatus").className), null, { timeout: 20000 });
+      return {
+        cls: await panel.getAttribute("#trendsStatus", "class"),
+        status: await panel.textContent("#trendsStatus"),
+        raw: JSON.parse((await panel.textContent("#raw")) || "{}"),
+      };
+    };
+    const a1 = await ask("jev");
+    check("侧边栏查询：取到并显示", /\bok\b/.test(a1.cls), a1.status);
+    const pts = await panel.getAttribute("#chart polyline", "points");
+    check("画出曲线（52 个点）", (pts || "").trim().split(/\s+/).length === 52);
+    const risingText = await panel.textContent("#rising");
+    check("上升最快的相关查询显示出来", risingText.includes("jev api") && risingText.includes("Breakout"), risingText);
+    const stats = await panel.textContent("#stats");
+    check("统计：点数、第一次有热度、耗时、网页链接", /52 个/.test(stats) && /第一次有热度/.test(stats) && /耗时/.test(stats)
+      && (await panel.getAttribute("#stats a", "href") || "").startsWith("https://trends.google.com/trends/explore"), stats.replace(/\s+/g, " ").slice(0, 120));
+    check("原始 JSON 可看：数据 + 调试信息", a1.raw.ok === true && a1.raw.data.points.length === 52 && /^https:\/\/trends\.google\.com\//.test(a1.raw.debug.url) && a1.raw.debug.related === true);
+    await new Promise((r) => setTimeout(r, 500));
+    check("默认取完关掉谷歌趋势标签页", trendsTabs2().length === 0);
+
+    await panel.check("#keepTab");
+    const a2 = await ask("jev");
+    await new Promise((r) => setTimeout(r, 500));
+    check("勾了「取完不关」：标签页留着对照", /\bok\b/.test(a2.cls) && trendsTabs2().length === 1);
+    for (const p of trendsTabs2()) await p.close();
+    await panel.uncheck("#keepTab");
+
+    throttle = true;
+    const a3 = await ask("limited");
+    throttle = false;
+    check("侧边栏查询被限流：显示原因", /\berr\b/.test(a3.cls) && /429/.test(a3.status), a3.status);
+    for (const p of trendsTabs2()) await p.close();
+
+    await panel.fill("#geo", "1x");
+    await panel.fill("#word", "jev");
+    await panel.click("#trendsGo");
+    check("地区写错：当场提示，不去开谷歌趋势", /两位国家码/.test(await panel.textContent("#trendsStatus")) && trendsTabs2().length === 0);
+    await panel.fill("#geo", "");
   } catch (e) {
     failed++;
     console.log("  ✕ 跑挂了：" + (e && e.stack || e));

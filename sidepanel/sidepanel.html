@@ -26,10 +26,39 @@
   </section>
 
   <section>
-    <h2>查一个新词</h2>
-    <p class="hint">Agent 需要谷歌趋势数据时，会让插件在后台打开谷歌趋势取回来（取完自动关掉），取过的词全站共享。</p>
-    <input id="word" type="text" placeholder="例如 jev" spellcheck="false" autocomplete="off">
-    <button type="button" class="primary" id="askWord">问 Agent：这是新词吗？</button>
+    <h2>谷歌趋势</h2>
+    <p class="hint">插件直接去谷歌趋势取数，结果只显示在这里：不经过 Agent、不扣积分、不进网站缓存，方便单独核对。地区不填就是全球。</p>
+    <input id="word" type="text" placeholder="关键词，例如 jev" spellcheck="false" autocomplete="off">
+    <div class="row">
+      <select id="range" aria-label="时间范围">
+        <option value="today 12-m" selected>过去 12 个月（按周）</option>
+        <option value="today 1-m">过去 30 天（按天）</option>
+        <option value="now 7-d">过去 7 天（按小时）</option>
+        <option value="today 5-y">过去 5 年（按周）</option>
+      </select>
+      <input id="geo" type="text" placeholder="地区如 US" title="两位国家码，如 US / GB / IN；不填 = 全球" maxlength="2" spellcheck="false" autocomplete="off" aria-label="地区（两位国家码）">
+    </div>
+    <label class="check"><input type="checkbox" id="keepTab"> 取完不关谷歌趋势标签页（对照网页核对）</label>
+    <button type="button" class="primary" id="trendsGo">查询</button>
+    <div id="trendsOut" hidden>
+      <p id="trendsStatus" class="status"></p>
+      <div id="chartBox" hidden>
+        <svg id="chart" viewBox="0 0 300 100" preserveAspectRatio="none" aria-label="相对热度曲线"></svg>
+        <div class="axis"><span id="axisFrom"></span><span id="axisTo"></span></div>
+        <dl id="stats"></dl>
+        <div class="rel">
+          <div><h3>上升最快</h3><ol id="rising"></ol></div>
+          <div><h3>热门</h3><ol id="top"></ol></div>
+        </div>
+        <p class="hint">0~100 是相对热度（这段时间里最热的点 = 100），不是搜索量。</p>
+      </div>
+      <details id="rawBox" hidden>
+        <summary>原始数据（JSON）</summary>
+        <button type="button" id="copyRaw" class="small">复制</button>
+        <pre id="raw"></pre>
+      </details>
+    </div>
+    <button type="button" id="askWord">问 Agent：这个词是不是新词、值不值得做？</button>
   </section>
 
   <footer>
