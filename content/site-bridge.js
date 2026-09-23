@@ -7,8 +7,8 @@
 // 经 SSE 把取数请求发给页面，页面转到这里，这里交给插件后台去开谷歌趋势。
 //
 // 在 document_start 就跑，并在 <html> 上盖个章（data-gefei-seo-ext=版本）：DOM 是页面和内容脚本共用的，
-// 页面可以同步读到。光靠 hello 不够——/chat/?q=… 进来（侧边栏「查一个新词」就是这么开的）会在页面脚本里
-// 同步自动发问，异步的 hello 永远赶不上那一问。
+// 页面可以同步读到。光靠 hello 不够——/chat/?q=… 进来（侧边栏「查一个新词」就是这么开的）会在页面加载时
+// 自动发问，异步的 hello 与这一问谁先到没保证，输了那一问就不带「可以请插件取数」。
 (function () {
   "use strict";
   var VERSION = chrome.runtime.getManifest().version;

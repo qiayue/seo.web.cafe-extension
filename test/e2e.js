@@ -47,7 +47,7 @@ const trendsPage = `<!doctype html><title>Google Trends (mock)</title><script>
 </script>`;
 
 // 假的对话页：只实现和插件说话的那几句（与 seo.web.cafe 的 chat-page.js 同一套协议）
-// __syncSeen：页面脚本同步执行那一刻能不能认出插件——真对话页 /chat/?q=… 的自动发问就在这一刻
+// __syncSeen：页面脚本一开始执行就能不能认出插件（最早的时刻）——真对话页 /chat/?q=… 的自动发问不管排在什么时候都不用赌时序
 const chatPage = `<!doctype html><title>chat (mock)</title><script>
   window.__syncSeen = document.documentElement.getAttribute('data-gefei-seo-ext');
   window.__hello = null; window.__results = {};
