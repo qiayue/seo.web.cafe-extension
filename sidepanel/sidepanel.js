@@ -238,6 +238,35 @@
   $("trendsGo").addEventListener("click", query);
   $("word").addEventListener("keydown", function (e) { if (e.key === "Enter") query(); });
 
+  // ---------- 插件正在做的事：后台的任务日志（storage.session.activity），进行中的在前、秒数实时走 ----------
+  // Agent 让插件取数时用户能看见它确实在干活、到了哪一步；取不到也写明原因，不用对着「正在查询」干着急
+  var activity = [];
+  function ago(ms) { var s2 = Math.max(0, Math.round(ms / 1000)); return s2 < 60 ? s2 + " 秒" : Math.floor(s2 / 60) + " 分 " + (s2 % 60) + " 秒"; }
+  function renderActivity() {
+    var list = $("actList");
+    while (list.firstChild) list.removeChild(list.firstChild);
+    var running = activity.filter(function (a) { return !a.endedAt; });
+    var done = activity.filter(function (a) { return a.endedAt; }).slice(0, 5);
+    $("actCount").textContent = running.length ? String(running.length) : "";
+    $("actEmpty").hidden = !!(running.length || done.length);
+    running.concat(done).forEach(function (a) {
+      var li = el("li", a.endedAt ? (a.ok ? "ok" : "bad") : "run");
+      var what = el("div", "what", a.keyword || "（没有词）");
+      what.appendChild(el("span", "meta", [a.range, a.geo || "全球", "来自" + (a.from || "?")].filter(Boolean).join(" · ")));
+      li.appendChild(what);
+      var step = a.endedAt
+        ? (a.ok ? (a.text || "取到了") : "没取到：" + (a.error || "原因不明")) + "（用了 " + ago(a.endedAt - a.startedAt) + "）"
+        : (a.text || "处理中…") + "（已经 " + ago(Date.now() - a.startedAt) + "）";
+      li.appendChild(el("div", "step", step));
+      list.appendChild(li);
+    });
+  }
+  chrome.storage.session.get("activity").then(function (r) { activity = r.activity || []; renderActivity(); });
+  chrome.storage.onChanged.addListener(function (changes, area) {
+    if (area === "session" && changes.activity) { activity = changes.activity.newValue || []; renderActivity(); }
+  });
+  setInterval(function () { if (activity.some(function (a) { return !a.endedAt; })) renderActivity(); }, 1000);
+
   // ---------- 当前网页 ----------
   // 两个来源：① 点插件图标那一下（activeTab，不用额外权限，后台记在 storage.session.lastPage）；
   // ② 用户点了「自动跟随当前网页」、授权了可选权限 tabs（Chrome 会写成「读取浏览记录」）之后：本窗口里换标签页、

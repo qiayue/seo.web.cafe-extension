@@ -56,3 +56,15 @@ button.link[hidden] { display: none; }
 .settings { margin: 0 0 12px; font-size: 12px; color: var(--muted); }
 .settings label { display: block; margin: 8px 0 4px; }
 .settings input { margin-bottom: 4px; }
+.count { display: inline-block; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--amber); color: var(--ink); font-size: 11px; text-align: center; }
+.count:empty { display: none; }
+ol.activity { list-style: none; padding: 0; margin: 0; }
+ol.activity li { padding: 6px 0; border-top: 1px dashed var(--line); font-size: 12.5px; }
+ol.activity li:first-child { border-top: none; }
+ol.activity .what { font-weight: 600; }
+ol.activity .meta { color: var(--muted); margin-left: 4px; font-weight: 400; }
+ol.activity .step { color: var(--muted); }
+ol.activity li.run .what::before { content: "⏳ "; }
+ol.activity li.ok .what::before { content: "✓ "; color: #1f7a52; }
+ol.activity li.bad .what::before { content: "✕ "; color: #a33a2b; }
+ol.activity li.bad .step { color: #a33a2b; }

@@ -9,6 +9,11 @@
 //   ② 点插件图标：记下当前网页、打开侧边栏（侧边栏里一键问 Agent「这个站流量怎么起来的」）。
 //   ③ 侧边栏自己也能发起取数（单独调试用，不经过 Agent）：走同一条取数路，结果送回侧边栏显示，不进网站缓存。
 //
+// 看得见在干活：每个取数任务一接单就回「收到」（对话页转给服务器——服务器 20 秒没等到「收到」就不再干等），
+// 之后每一步（打开谷歌趋势 / 页面加载完 / 切到前台 / 曲线到了）都报一句进度；同时记进任务日志
+// （storage.session.activity，侧边栏「插件正在做的事」照着显示），工具栏图标上的数字是正在跑的任务数。
+// 用户在对话页点了停止：对话页发 trends:cancel，这里关掉那个标签页、结束任务。
+//
 // MV3 的 service worker 随时可能被浏览器回收：进行中的取数任务存在 chrome.storage.session 里，不放内存。
 // 超时用 setTimeout，worker 被回收就丢了——对话页那边自己也有 60 秒的超时兜底，不会干等。
 importScripts("lib/trends-parse.js");
@@ -30,11 +35,61 @@ function serial(fn) {
 function loadJobs() { return chrome.storage.session.get("jobs").then(function (r) { return r.jobs || {}; }); }
 function saveJobs(jobs) { return chrome.storage.session.set({ jobs: jobs }); }
 
+// ---------- 任务日志 + 图标数字：侧边栏「插件正在做的事」照着它显示 ----------
+var ACTIVITY_MAX = 20;
+var RANGE_LABEL = { "now 7-d": "过去 7 天", "today 1-m": "过去 30 天", "today 3-m": "过去 90 天", "today 12-m": "过去 12 个月", "today 5-y": "过去 5 年" };
+function logActivity(requestId, patch) {
+  return serial(function () {
+    return chrome.storage.session.get("activity").then(function (r) {
+      var list = r.activity || [];
+      var i = list.findIndex(function (a) { return a.id === requestId; });
+      if (i < 0) { list.unshift(Object.assign({ id: requestId, startedAt: Date.now() }, patch)); }
+      else list[i] = Object.assign({}, list[i], patch, { updatedAt: Date.now() });
+      list = list.slice(0, ACTIVITY_MAX);
+      var running = list.filter(function (a) { return !a.endedAt; }).length;
+      chrome.action.setBadgeText({ text: running ? String(running) : "" }).catch(function () {});
+      return chrome.storage.session.set({ activity: list });
+    });
+  });
+}
+chrome.action.setBadgeBackgroundColor({ color: "#c9831f" }).catch(function () {});
+// 后台被浏览器回收过：还挂着「进行中」的老任务其实已经没人管了（计时器随 worker 一起没了），如实收尾
+serial(function () {
+  return chrome.storage.session.get(["activity", "jobs"]).then(function (r) {
+    var jobs = r.jobs || {}, live = {};
+    Object.keys(jobs).forEach(function (k) { live[jobs[k].requestId] = true; });
+    var list = (r.activity || []).map(function (a) {
+      return a.endedAt || live[a.id] ? a : Object.assign({}, a, { endedAt: Date.now(), ok: false, error: "插件后台重启过，这个任务没做完" });
+    });
+    var running = list.filter(function (a) { return !a.endedAt; }).length;
+    chrome.action.setBadgeText({ text: running ? String(running) : "" }).catch(function () {});
+    return chrome.storage.session.set({ activity: list });
+  });
+});
+
+/** 报一步进度：发给发起方（对话页标签页 / 侧边栏），并记进任务日志 */
+function notify(job, stage, text) {
+  var m = { type: "trends:progress", requestId: job.requestId, stage: stage, text: text };
+  if (job.toPanel) chrome.runtime.sendMessage(m).catch(function () {});
+  else if (job.originTabId != null) chrome.tabs.sendMessage(job.originTabId, m).catch(function () {});
+  logActivity(job.requestId, { stage: stage, text: text });
+}
+
 /** from：{ tab }（seo.web.cafe 对话页，结果送回那个标签页）或 { panel, tab?, windowId? }（插件侧边栏，结果广播给插件页面） */
 function startJob(msg, from) {
   return serial(function () {
     if (!/^[a-f0-9]{32}$/.test(String(msg.requestId || ""))) throw new Error("取数单号不对");
     var url = P.buildTrendsUrl({ keyword: msg.keyword, geo: msg.geo, date: msg.date });
+    return loadJobs().then(function (jobs) {
+      // 同一张单已经在取了（对话页刷新后，服务器把还没确认接单的单子又交给了新页面）：不再开第二个标签页
+      var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
+      return dup ? null : openJob(msg, from, url);
+    });
+  });
+}
+
+/** 开谷歌趋势标签页、记进任务表（在 startJob 的串行队列里调用） */
+function openJob(msg, from, url) {
     var winId = from.tab ? from.tab.windowId : (Number.isInteger(msg.windowId) ? msg.windowId : undefined);
     var opts = { url: url + AWAKE_MARK, active: !!(from.panel && msg.foreground) }; // 侧边栏可选「前台打开」，排查慢的时候对照用
     if (winId !== undefined) opts.windowId = winId;
@@ -56,6 +111,8 @@ function startJob(msg, from) {
           };
           return saveJobs(jobs);
         }).then(function () {
+          logActivity(msg.requestId, { keyword: String(msg.keyword || "").trim(), range: RANGE_LABEL[msg.date] || "", geo: msg.geo || "",
+            from: from.panel ? "侧边栏" : "对话页", stage: "opened", text: "已打开谷歌趋势，等页面加载…" });
           setTimeout(function () { toForeground(tab.id); }, FOREGROUND_AFTER_MS);
           setTimeout(function () {
             finish(tab.id, { ok: false, error: (JOB_TIMEOUT_MS / 1000) + " 秒内没取到数据（谷歌趋势页面可能没加载完，或要求人机验证）——已把那个标签页切到前台，看一眼就知道" }, true);
@@ -63,7 +120,6 @@ function startJob(msg, from) {
         });
       });
     });
-  });
 }
 
 /** 后台叫不醒的兜底：还没等到曲线，就把标签页切到前台（看得见的页面谷歌才加载），取到后在 finish 里切回去 */
@@ -78,14 +134,12 @@ function toForeground(tabId) {
   }).then(function (job) {
     if (!job) return;
     chrome.tabs.update(tabId, { active: true }).catch(function () {});
-    var note = { type: "trends:progress", requestId: job.requestId, stage: "foreground",
-      text: "后台标签页 " + (FOREGROUND_AFTER_MS / 1000) + " 秒没动静，已把谷歌趋势切到前台让它加载，取到后自动切回" };
-    if (job.toPanel) chrome.runtime.sendMessage(note).catch(function () {});
+    notify(job, "foreground", "后台 " + (FOREGROUND_AFTER_MS / 1000) + " 秒没动静，已切到前台让它加载，取到后自动切回");
   });
 }
 
 /** 结束一个任务：结果送回对话页。成功就关掉谷歌趋势标签页；失败就把它切到前台让用户看见（多半是要人机验证） */
-function finish(tabId, result, reveal) {
+function finish(tabId, result, reveal, cancelled) {
   return serial(function () {
     return loadJobs().then(function (jobs) {
       var job = jobs[tabId];
@@ -100,8 +154,10 @@ function finish(tabId, result, reveal) {
             loadMs: at(job.loadedAt), timelineMs: at(job.timelineAt), relatedMs: at(job.relatedAt), foregroundMs: at(job.foregroundAt) } };
         if (job.toPanel) chrome.runtime.sendMessage(msg).catch(function () {}); // 侧边栏关了就没人收，无所谓
         else chrome.tabs.sendMessage(job.originTabId, msg).catch(function () {});
+        logActivity(job.requestId, { endedAt: Date.now(), ok: !!result.ok, error: result.error || "", stage: result.ok ? "done" : "failed",
+          text: result.ok ? "取到了（" + ((result.data && result.data.points) || []).length + " 个点）" : "" });
         if (result.ok && job.keepTab) chrome.tabs.update(tabId, { active: true }).catch(function () {});
-        else if (result.ok) {
+        else if (result.ok || cancelled) {
           // 被切到过前台的：先切回原来那个标签页，再关（直接关的话浏览器会跳到旁边随便一个标签页）
           var back = job.foregroundAt && job.returnTabId ? chrome.tabs.update(job.returnTabId, { active: true }).catch(function () {}) : Promise.resolve();
           back.then(function () { chrome.tabs.remove(tabId).catch(function () {}); });
@@ -126,7 +182,7 @@ function onCaptured(tabId, msg) {
       if (msg.kind === "timeline" && !job.points && Array.isArray(msg.points) && msg.points.length) {
         job.points = msg.points;
         job.timelineAt = Date.now();
-        return saveJobs(jobs).then(function () { return job.rising ? { done: okResult(job) } : { grace: true }; });
+        return saveJobs(jobs).then(function () { return job.rising ? { done: okResult(job) } : { grace: true, job: job }; });
       }
       if (msg.kind === "related" && !job.rising) {
         job.top = msg.top || [];
@@ -140,6 +196,7 @@ function onCaptured(tabId, msg) {
     if (!next) return;
     if (next.done) return finish(tabId, next.done, next.reveal);
     if (next.grace) {
+      notify(next.job, "timeline", "曲线到了，再等一下相关查询…");
       setTimeout(function () {
         loadJobs().then(function (jobs) { var j = jobs[tabId]; if (j && j.points) finish(tabId, okResult(j)); });
       }, RELATED_GRACE_MS);
@@ -162,6 +219,14 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return true; // 异步回话
   }
   if (msg.type === "trends:captured" && sender.tab) { onCaptured(sender.tab.id, msg); return false; }
+  if (msg.type === "trends:cancel" && /^[a-f0-9]{32}$/.test(String(msg.requestId || ""))) {
+    // 对话页点了停止（或侧边栏取消）：结束这张单、关掉它开的标签页。只认同样两处发来的
+    var okSender = (sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0) || (!!sender.tab && sender.origin === SITE_ORIGIN);
+    if (okSender) loadJobs().then(function (jobs) {
+      Object.keys(jobs).forEach(function (k) { if (jobs[k].requestId === msg.requestId) finish(Number(k), { ok: false, error: "已取消（点了停止）" }, false, true); });
+    });
+    return false;
+  }
   return false;
 });
 
@@ -177,10 +242,11 @@ chrome.tabs.onUpdated.addListener(function (tabId, info, tab) {
       var job = jobs[tabId];
       if (!job) return false;
       if (!tab.url || tab.url.indexOf("https://trends.google.com/") !== 0) return true;
-      if (!job.loadedAt) { job.loadedAt = Date.now(); return saveJobs(jobs).then(function () { return false; }); }
+      if (!job.loadedAt) { job.loadedAt = Date.now(); return saveJobs(jobs).then(function () { return job.points ? false : job; }); }
       return false;
     });
   }).then(function (redirected) {
+    if (redirected && redirected !== true) { notify(redirected, "loaded", "页面加载完了，等它出数据…"); return; }
     if (redirected) finish(tabId, { ok: false, error: "谷歌把页面跳走了（多半是要人机验证）——已把那个标签页切到前台，验证完回对话页再问一次" }, true);
   });
 });

@@ -73,12 +73,16 @@ const trendsPage = `<!doctype html><title>Google Trends (mock)</title><script>
 // __syncSeen：页面脚本一开始执行就能不能认出插件（最早的时刻）——真对话页 /chat/?q=… 的自动发问不管排在什么时候都不用赌时序
 const chatPage = `<!doctype html><title>chat (mock)</title><script>
   window.__syncSeen = document.documentElement.getAttribute('data-gefei-seo-ext');
-  window.__hello = null; window.__results = {};
+  window.__hello = null; window.__results = {}; window.__accepted = {}; window.__progress = {};
   window.addEventListener('message', function (e) {
     if (e.source !== window || !e.data || e.data.source !== 'gefei-seo-ext') return;
-    if (e.data.type === 'hello') window.__hello = e.data;
-    if (e.data.type === 'trends:result') window.__results[e.data.requestId] = e.data;
+    var d = e.data;
+    if (d.type === 'hello') window.__hello = d;
+    if (d.type === 'trends:result') window.__results[d.requestId] = Object.assign({ acceptedFirst: !!window.__accepted[d.requestId] }, d);
+    if (d.type === 'trends:accepted') window.__accepted[d.requestId] = Date.now();
+    if (d.type === 'trends:progress') (window.__progress[d.requestId] = window.__progress[d.requestId] || []).push(d.stage);
   });
+  window.__cancel = function (id) { window.postMessage({ source: 'gefei-seo-page', type: 'trends:cancel', requestId: id }, location.origin); };
   window.postMessage({ source: 'gefei-seo-page', type: 'ping' }, location.origin);
   window.__fetch = function (id, kw) {
     window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', requestId: id, keyword: kw, geo: '', date: 'today 12-m' }, location.origin);
@@ -172,6 +176,9 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     const pj = probes.jev || {};
     check("插件开的标签页：被「叫醒」（页面看到自己是可见的），网址里的记号已经抹掉", pj.patched === true && !/#/.test(pj.href || "x"), JSON.stringify(pj));
     check("相关查询也带回来了", r1.data && r1.data.rising[0] && r1.data.rising[0].q === "jev api" && r1.data.rising[0].v === "Breakout");
+    check("先回「收到」、再交结果（服务器靠「收到」判断插件在不在）", r1.acceptedFirst === true);
+    const prog1 = await chat.evaluate((id) => window.__progress[id] || [], ID1);
+    check("每一步都报进度给对话页（页面加载完 / 曲线到了）", prog1.includes("loaded") && prog1.includes("timeline"), prog1.join(","));
     await new Promise((r) => setTimeout(r, 800));
     const trendsTabs = context.pages().filter((p) => p.url().startsWith("https://trends.google.com/"));
     check("取完自动关掉谷歌趋势标签页", trendsTabs.length === 0, trendsTabs.map((p) => p.url()).join(","));
@@ -222,6 +229,24 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     check("取完切回对话页、谷歌趋势标签页关掉", before.some((b) => after.some((a) => a.id === b.id)) && !after.some((a) => a.url.startsWith("https://trends.google.com/"))
       && context.pages().filter((p) => p.url().startsWith("https://trends.google.com/")).length === 0, JSON.stringify({ before, after }));
 
+    // ④e 用户点了停止：对话页发 trends:cancel → 插件结束任务、关掉标签页；图标上的数字跟着变
+    const badge = () => sw.evaluate(() => chrome.action.getBadgeText({}));
+    const ID5 = "f".repeat(32);
+    await chat.evaluate((id) => window.__fetch(id, "stall"), ID5);
+    await chat.evaluate((id) => window.__fetch(id, "stall"), ID5); // 同一张单来两次（刷新后重新转交）：只开一个标签页
+    await chat.waitForFunction((id) => window.__accepted[id], ID5, { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 600));
+    const openNow = context.pages().filter((p) => p.url().startsWith("https://trends.google.com/")).length;
+    check("同一张单来两次：只开一个谷歌趋势标签页", openNow === 1, String(openNow));
+    check("正在跑：工具栏图标上显示 1", (await badge()) === "1", await badge());
+    await chat.evaluate((id) => window.__cancel(id), ID5);
+    await chat.waitForFunction((id) => window.__results[id], ID5, { timeout: 5000 });
+    const r5 = await chat.evaluate((id) => window.__results[id], ID5);
+    await new Promise((r) => setTimeout(r, 600));
+    check("点了停止：任务结束、说明原因、标签页关掉、图标数字清掉", r5.ok === false && /取消/.test(r5.error)
+      && context.pages().filter((p) => p.url().startsWith("https://trends.google.com/")).length === 0 && (await badge()) === "", r5.error);
+    while (stalled.length) stalled.shift()();
+
     // ④d 用户自己打开的谷歌趋势标签页：插件一个字节都不改
     const own = await context.newPage();
     await own.goto("https://trends.google.com/trends/explore?q=owntab");
@@ -248,6 +273,9 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     check("侧边栏能打开、没有脚本错误", errors.length === 0, errors.join(" | "));
     const ver = await panel.textContent("#ver");
     check("侧边栏显示版本号", /版本 \d+\.\d+\.\d+/.test(ver), ver);
+    const acts = await panel.$$eval("#actList li", (els) => els.map((e) => e.className + "|" + e.textContent));
+    check("「插件正在做的事」：列出刚才对话页让它取的词，成功打勾、取消 / 失败写明原因", acts.some((a) => /^ok\|jev/.test(a) && /来自对话页/.test(a))
+      && acts.some((a) => /^bad\|stall/.test(a) && /取消/.test(a)) && acts.some((a) => /^bad\|limited/.test(a) && /429/.test(a)), acts.slice(0, 4).join(" / "));
     await panel.fill("#pageUrl", "https://www.imagedetector.com/pricing");
     const [chatTab] = await Promise.all([context.waitForEvent("page"), panel.click('[data-ask="traffic"]')]);
     await chatTab.waitForLoadState();
