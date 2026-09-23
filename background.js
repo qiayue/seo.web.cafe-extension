@@ -105,7 +105,7 @@ function openJob(msg, from, url) {
             requestId: msg.requestId, url: url, returnTabId: returnTabId,
             originTabId: from.panel ? null : from.tab.id, toPanel: !!from.panel,
             keepTab: !!(from.panel && msg.keepTab), // 调试用：取完不关，方便对照网页核对
-            keyword: String(msg.keyword || "").replace(/\s+/g, " ").trim().toLowerCase(),
+            keyword: P.normKeywords(msg.keyword), // 对比几个词时是「词1,词2」，和曲线接口里读出来的写法一致
             startedAt: Date.now(), points: null, top: null, rising: null,
             loadedAt: null, timelineAt: null, relatedAt: null, foregroundAt: opts.active ? Date.now() : null,
           };
@@ -169,8 +169,12 @@ function finish(tabId, result, reveal, cancelled) {
 }
 
 function okResult(job) {
-  return { ok: true, data: { keyword: job.keyword, points: job.points, top: job.top || [], rising: job.rising || [] } };
+  var data = { keyword: job.keyword, points: job.points, top: job.top || [], rising: job.rising || [] };
+  if (isCompare(job)) data.keywords = job.keyword.split(",");
+  return { ok: true, data: data };
 }
+// 对比几个词：谷歌给每个词单独出一份相关查询，这里不取（要看相关查询就单独查那个词），曲线一到就交
+function isCompare(job) { return String(job.keyword || "").indexOf(",") >= 0; }
 
 function onCaptured(tabId, msg) {
   return serial(function () {
@@ -182,7 +186,7 @@ function onCaptured(tabId, msg) {
       if (msg.kind === "timeline" && !job.points && Array.isArray(msg.points) && msg.points.length) {
         job.points = msg.points;
         job.timelineAt = Date.now();
-        return saveJobs(jobs).then(function () { return job.rising ? { done: okResult(job) } : { grace: true, job: job }; });
+        return saveJobs(jobs).then(function () { return job.rising || isCompare(job) ? { done: okResult(job) } : { grace: true, job: job }; });
       }
       if (msg.kind === "related" && !job.rising) {
         job.top = msg.top || [];

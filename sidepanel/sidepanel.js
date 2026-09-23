@@ -45,7 +45,9 @@
   $("askWord").addEventListener("click", function () {
     var w = word();
     if (!w) { $("word").focus(); return; }
-    openChat("「" + w + "」是不是新词？它是什么时候开始有热度的、现在还在涨吗？值不值得做？");
+    var ws = P.normKeywords(w).split(",");
+    openChat(ws.length > 1 ? "用谷歌趋势把 " + ws.join("、") + " 放在同一次查询里对比一下热度，谁更热、差几倍？"
+      : "「" + w + "」是不是新词？它是什么时候开始有热度的、现在还在涨吗？值不值得做？");
   });
 
   // ---------- 谷歌趋势：插件直接取数，显示在这里（单独调试用，不经过 Agent、不进网站缓存） ----------
@@ -113,16 +115,29 @@
     var chart = svg("svg", { viewBox: "0 0 300 100", preserveAspectRatio: "none", "aria-label": "相对热度曲线" });
     [25, 50, 75].forEach(function (y) { chart.appendChild(svg("line", { x1: 0, x2: 300, y1: y, y2: y })); });
     var n = pts.length;
-    var xy = function (p, i) { return (n > 1 ? (i / (n - 1)) * 300 : 150).toFixed(1) + "," + (100 - p.v).toFixed(1); };
+    // 对比几个词：每个点带 vs（每个词一个值，同一把尺子），每个词画一条线
+    var series = n && Array.isArray(pts[0].vs) ? pts[0].vs.length : 0;
+    var names = series ? (d.keywords || String(d.keyword || q.keyword).split(",")).slice(0, series) : [];
+    var val = function (p, k) { return series ? (p.vs[k] || 0) : p.v; };
     var partial = n && pts[n - 1].p ? pts[n - 1] : null;
     var full = partial ? pts.slice(0, n - 1) : pts;
-    chart.appendChild(svg("polyline", { "class": "full", points: full.map(xy).join(" ") }));
-    if (partial && n > 1) chart.appendChild(svg("polyline", { "class": "partial", points: xy(pts[n - 2], n - 2) + " " + xy(partial, n - 1) }));
+    for (var k = Math.max(series, 1) - 1; k >= 0; k--) { // 第一个词最后画，压在最上面
+      var xy = function (p, i) { return (n > 1 ? (i / (n - 1)) * 300 : 150).toFixed(1) + "," + (100 - val(p, k)).toFixed(1); };
+      chart.appendChild(svg("polyline", { "class": "full s" + k, points: full.map(xy).join(" ") }));
+      if (partial && n > 1) chart.appendChild(svg("polyline", { "class": "partial s" + k, points: xy(pts[n - 2], n - 2) + " " + xy(partial, n - 1) }));
+    }
     box.appendChild(chart);
+    if (series) {
+      var legend = el("div", "legend");
+      names.forEach(function (w, i) { legend.appendChild(el("span", "s" + i, w)); });
+      box.appendChild(legend);
+    }
     var axis = el("div", "axis");
     axis.appendChild(el("span", null, n ? fmt(pts[0].t, hourly) : ""));
     axis.appendChild(el("span", null, n ? fmt(pts[n - 1].t, hourly) : ""));
     box.appendChild(axis);
+
+    if (series) return compareStats(box, res, q, pts, names, partial, hourly, unit);
 
     var dl = el("dl");
     var peak = null, first = null;
@@ -174,6 +189,44 @@
     return wave;
   }
 
+  /** 对比卡片的统计：每个词的平均 / 最高，和第一个词比是几倍（同一次查询里才能这么比）；对比时不取相关查询 */
+  function compareStats(box, res, q, pts, names, partial, hourly, unit) {
+    var dl = el("dl"), n = pts.length;
+    var full = partial ? pts.slice(0, n - 1) : pts;
+    // 倍数按最近一段（后四分之一）的平均算：新词整段平均会被前面的 0 拉低；和网站那边的对比报告同一个口径
+    var recentN = Math.max(3, Math.floor(full.length / 4)), recent = full.slice(-recentN);
+    var mean = function (arr, k) { return arr.reduce(function (a, p) { return a + (p.vs[k] || 0); }, 0) / Math.max(1, arr.length); };
+    var avg = names.map(function (_, k) { return mean(full, k); }), rec = names.map(function (_, k) { return mean(recent, k); });
+    var times = function (x, b) { var r = x / b; return r >= 10 ? String(Math.round(r)) : r < 0.01 ? "不到 0.01" : r.toFixed(r < 0.1 ? 3 : 2); };
+    // 倍数的基准：有 GPTs 就拿它（哥飞看新词大小的老参照词），没有就拿第一个词；按最近热度从高到低列，一眼看出谁高谁低
+    var b = Math.max(0, names.indexOf("gpts"));
+    var order = names.map(function (_, k) { return k; }).sort(function (x, y) { return rec[y] - rec[x] || avg[y] - avg[x]; });
+    row(dl, "点数", n + " 个（按" + unit + (partial ? "，最后 1 个没过完，平均没算它" : "") + "）");
+    row(dl, "谁高谁低", order.map(function (k) { return names[k]; }).join(" > ") + "（最近 " + recentN + " " + unit + "）");
+    order.forEach(function (k) {
+      var peak = null;
+      pts.forEach(function (p) { if (!peak || p.vs[k] > peak.vs[k]) peak = p; }); // 一样高取最早那个（平的线别指到没过完的点上）
+      var ratio = k === b ? "（基准）" : rec[b] > 0 ? "，是 " + names[b] + " 的 " + times(rec[k], rec[b]) + " 倍" : "";
+      row(dl, names[k], "最近 " + recentN + " " + unit + "平均 " + rec[k].toFixed(1) + ratio + " · 整段平均 " + avg[k].toFixed(1) + " · 最高 " + peak.vs[k] + "（" + fmt(peak.t, hourly) + (peak.p ? "，没过完" : "") + "）");
+    });
+    var dbg = res.debug || {};
+    if (dbg.ms != null) row(dl, "耗时", sec(dbg.ms));
+    if (dbg.url) {
+      var a = el("a", null, "打开这个谷歌趋势网页");
+      a.href = dbg.url; a.target = "_blank"; a.rel = "noopener";
+      row(dl, "网页", a);
+    }
+    box.appendChild(dl);
+    box.appendChild(el("p", "hint", "几个词在同一次查询里：这次所有词、所有点里最高的那个记 100，所以可以直接比高低。对比时不取相关查询，要看就单独查那个词。"));
+    var raw = el("details");
+    raw.appendChild(el("summary", null, "原始数据（JSON）"));
+    raw.appendChild(el("pre", null, JSON.stringify(res, null, 2)));
+    box.appendChild(raw);
+    $("results").appendChild(box);
+    $("trendsNote").hidden = false;
+    return null; // 对比不自动补查
+  }
+
   function busy(on) {
     $("trendsGo").disabled = on;
     $("trendsGo").textContent = on ? "正在取…" : "查询";
@@ -213,7 +266,8 @@
       setStatus("最新一波从 " + fmt(wave.start.t, false) + (UNIT[q.date] === "周" ? " 那一周" : "") + " 起（之前最高只有 " + wave.before + "），接着查" + LABEL[finer] + "看它是哪天起来的……");
       fetchTrends({ keyword: q.keyword, geo: q.geo, date: finer, auto: true });
     } else {
-      setStatus("取到了：" + ((res.data && res.data.keyword) || q.keyword) + (q.auto ? "（含自动补查）" : ""), "ok");
+      var kws = (res.data && res.data.keywords) || null;
+      setStatus(kws ? "取到了：" + kws.join("、") + " 的对比（同一次查询，可以直接比高低）" : "取到了：" + ((res.data && res.data.keyword) || q.keyword) + (q.auto ? "（含自动补查）" : ""), "ok");
     }
   }
 
@@ -232,8 +286,10 @@
     var results = $("results");
     while (results.firstChild) results.removeChild(results.firstChild);
     $("trendsNote").hidden = true;
-    setStatus("正在后台打开谷歌趋势取「" + w + "」，一般几秒到十几秒……");
-    fetchTrends({ keyword: w, geo: geo, date: $("range").value, auto: false });
+    var words = P.normKeywords(w).split(",");
+    if (/[,，]/.test(w) && w.split(/[,，]/).filter(function (x) { return x.trim(); }).length > P.MAX_COMPARE) { setStatus("谷歌趋势一次最多对比 " + P.MAX_COMPARE + " 个词。", "err"); return; }
+    setStatus(words.length > 1 ? "正在后台打开谷歌趋势对比「" + words.join("、") + "」（同一次查询，热度在同一把尺子上）……" : "正在后台打开谷歌趋势取「" + w + "」，一般几秒到十几秒……");
+    fetchTrends({ keyword: words.length > 1 ? words.join(",") : w, geo: geo, date: $("range").value, auto: false });
   }
   $("trendsGo").addEventListener("click", query);
   $("word").addEventListener("keydown", function (e) { if (e.key === "Enter") query(); });

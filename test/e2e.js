@@ -49,7 +49,9 @@ const JEV30 = require("./fixtures/jev-30d.json").points.map((p) => p.v).concat(7
 const dayStart = NOW - (NOW % DAY);
 const DAILY = JEV30.map((v, i) => Object.assign({ time: String(dayStart - (JEV30.length - 1 - i) * DAY), value: [v], hasData: [true] },
   i === JEV30.length - 1 ? { isPartial: true } : {}));
-const timeline = (date) => ({ default: { timelineData: /1-m|3-m|7-d/.test(date || "") ? DAILY : WEEKLY } });
+// 对比几个词：第一个词照上面，第二个词一直 40、第三个一直 10（同一把尺子）
+const timeline = (date, n = 1) => ({ default: { timelineData: (/1-m|3-m|7-d/.test(date || "") ? DAILY : WEEKLY)
+  .map((r) => n > 1 ? Object.assign({}, r, { value: [r.value[0]].concat([40, 10, 5, 2].slice(0, n - 1)) }) : r) } });
 const RELATED = { default: { rankedList: [{ rankedKeyword: [{ query: "jev ai", value: 100, formattedValue: "100" }] }, { rankedKeyword: [{ query: "jev api", value: 4550, formattedValue: "Breakout" }] }] } };
 
 // 假的谷歌趋势探索页：和真页面一样，自己去请求两个接口（一个 fetch、一个 XHR，两种都要截得到）
@@ -59,14 +61,17 @@ const trendsPage = `<!doctype html><title>Google Trends (mock)</title><script>
   var q = sp.get('q') || '';
   var patched = !/native code/.test(Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get.toString());
   fetch('/trends/probe?q=' + encodeURIComponent(q) + '&patched=' + patched + '&href=' + encodeURIComponent(location.href));
-  var kw = { type: 'BROAD', value: q };
-  var multi = { time: sp.get('date') || '', resolution: 'WEEK', comparisonItem: [{ geo: {}, complexKeywordsRestriction: { keyword: [kw] } }] };
-  var rel = { restriction: { geo: {}, complexKeywordsRestriction: { keyword: [kw] } }, keywordType: 'QUERY', metric: ['TOP', 'RISING'] };
+  // 和真页面一样：对比几个词时曲线接口一个（每个词一个 comparisonItem），相关查询每个词各一个
+  var words = q.split(',');
+  var multi = { time: sp.get('date') || '', resolution: 'WEEK', comparisonItem: words.map(function (w) { return { geo: {}, complexKeywordsRestriction: { keyword: [{ type: 'BROAD', value: w }] } }; }) };
   fetch('/trends/api/widgetdata/multiline?hl=en-US&req=' + encodeURIComponent(JSON.stringify(multi)) + '&token=t');
   setTimeout(function () {
-    var x = new XMLHttpRequest();
-    x.open('GET', '/trends/api/widgetdata/relatedsearches?hl=en-US&req=' + encodeURIComponent(JSON.stringify(rel)) + '&token=t');
-    x.send();
+    words.forEach(function (w) {
+      var rel = { restriction: { geo: {}, complexKeywordsRestriction: { keyword: [{ type: 'BROAD', value: w }] } }, keywordType: 'QUERY', metric: ['TOP', 'RISING'] };
+      var x = new XMLHttpRequest();
+      x.open('GET', '/trends/api/widgetdata/relatedsearches?hl=en-US&req=' + encodeURIComponent(JSON.stringify(rel)) + '&token=t');
+      x.send();
+    });
   }, 300);
 </script>`;
 
@@ -116,7 +121,7 @@ function handle(req, res) {
     if (u.pathname.includes("/widgetdata/multiline")) {
       const req = JSON.parse(u.searchParams.get("req") || "{}");
       const kw = req.comparisonItem && req.comparisonItem[0].complexKeywordsRestriction.keyword[0].value;
-      const reply = () => (throttle ? send(429, "text/plain", "Too Many Requests") : send(200, "application/json", XSSI + JSON.stringify(timeline(req.time))));
+      const reply = () => (throttle ? send(429, "text/plain", "Too Many Requests") : send(200, "application/json", XSSI + JSON.stringify(timeline(req.time, req.comparisonItem.length))));
       if (kw === "stall") { stalled.push(reply); return; }
       return reply();
     }
@@ -368,6 +373,21 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     check("地区写错：当场提示，不去开谷歌趋势", /两位国家码/.test(await panel.textContent("#trendsStatus")) && trendsTabs2().length === 0);
     await panel.fill("#geo", "");
 
+    // ⑩ 对比几个词：谷歌趋势的 0~100 是每次查询各自归一化的，分开查的两条曲线不能比高低——要比就放进同一次查询
+    await panel.check("#autoFiner");
+    const a4 = await ask("jev, GPTs，jev");
+    const c4 = a4.cards[0] || {};
+    const lines4 = await panel.$$eval(".result polyline.full", (els) => els.map((e) => e.getAttribute("class")));
+    const legend4 = await panel.$$eval(".result .legend span", (els) => els.map((e) => e.textContent));
+    check("侧边栏对比：一次查询、一张卡（不自动补查），两个词各一条线、有图例", /\bok\b/.test(a4.cls) && a4.cards.length === 1 && lines4.length === 2 && legend4.join() === "jev,gpts", lines4.join() + " / " + legend4.join());
+    check("对比网址：q=jev,gpts（大小写、重复、中文逗号都收拾好）", /[?&]q=jev,gpts$/.test(c4.raw.debug.url), c4.raw.debug.url);
+    check("对比数据：每个点带两个词的值，写明是哪两个词", c4.raw.data.keywords.join() === "jev,gpts" && c4.raw.data.points.every((p) => p.vs && p.vs.length === 2) && c4.raw.data.points[0].vs[1] === 40);
+    // 倍数按最近 13 周（过完的 52 周的后四分之一）的平均：jev 这 13 周是 0…0、20、45、80，平均 145 / 13 ≈ 11.2；gpts 一直 40 → jev 是它的 0.28 倍
+    check("对比统计：谁高谁低按最近一段排；有 GPTs 就以它为基准算倍数", /谁高谁低gpts > jev（最近 13 周）/.test(c4.stats) && /gpts最近 13 周平均 40\.0（基准）/.test(c4.stats)
+      && /jev最近 13 周平均 11\.2，是 gpts 的 0\.28 倍 · 整段平均 2\.8/.test(c4.stats), (c4.stats || "").replace(/\s+/g, " ").slice(0, 240));
+    check("对比不等相关查询：曲线一到就交", c4.raw.debug.related === false && c4.raw.data.rising.length === 0);
+    for (const p of trendsTabs2()) await p.close();
+
     // ⑨ 插件更新 / 重新加载（用户在 chrome://extensions 点了刷新）：已经打开的对话页不用刷新——
     //    新插件把传话脚本补进页面（hello 再来一次），页面里失效的旧脚本只说「我失效了」、不抢着回失败，新脚本接单、照常取到
     await chat.bringToFront();
@@ -389,6 +409,14 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     await swNew.evaluate(() => ensureBridges());
     await chat.waitForTimeout(1000);
     check("后台再起来：传话脚本活着就不重复补", (await chat.evaluate(() => window.__helloCount)) === h0);
+
+    // 对话页请插件对比（Agent 调 google_trends 带 compare）
+    const IDC = "c".repeat(32);
+    await chat.evaluate((id) => window.__fetch(id, "jev,gpts,sora"), IDC);
+    await chat.waitForFunction((id) => window.__results[id], IDC, { timeout: 20000 }).catch(() => {});
+    const rc = await chat.evaluate((id) => window.__results[id] || null, IDC);
+    check("对话页对比三个词：取到，三个词在同一把尺子上", rc && rc.ok && rc.data.keywords.join() === "jev,gpts,sora" && rc.data.points.every((p) => p.vs.length === 3), rc && rc.error);
+    check("对比不等相关查询的宽限（2.5 秒）：曲线一到就交", rc && rc.debug && rc.debug.ms < 2000 && rc.debug.related === false, rc && rc.debug && rc.debug.ms + "ms");
     await context.close();
 
     // ⑧ 自动跟随当前网页：要用户授权可选权限 tabs——无头浏览器点不了授权弹窗，

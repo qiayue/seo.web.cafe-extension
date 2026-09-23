@@ -35,6 +35,10 @@ button:disabled { opacity: .6; cursor: default; }
 .result svg { width: 100%; height: 110px; display: block; background: var(--bg); border-radius: 8px; }
 .result svg polyline { fill: none; stroke: var(--amber-dk); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
 .result svg polyline.partial { stroke-dasharray: 4 3; opacity: .8; }
+.result svg polyline.s1 { stroke: #3b7dd8; } .result svg polyline.s2 { stroke: #2e9c6a; } .result svg polyline.s3 { stroke: #b0467a; } .result svg polyline.s4 { stroke: #8a7a6f; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; margin: 4px 0 0; }
+.legend span::before { content: ""; display: inline-block; width: 12px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; background: var(--amber-dk); }
+.legend .s1::before { background: #3b7dd8; } .legend .s2::before { background: #2e9c6a; } .legend .s3::before { background: #b0467a; } .legend .s4::before { background: #8a7a6f; }
 .result svg line { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin: 2px 0 8px; }
 dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0 0 8px; font-size: 12.5px; }

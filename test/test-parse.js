@@ -141,5 +141,27 @@ check("空词 / 太长的词报错", () => {
   assert.throws(() => P.buildTrendsUrl({ keyword: "x".repeat(101) }));
 });
 
+console.log("【对比几个词：同一次查询，热度在同一把尺子上】");
+check("词的写法统一：小写、去空格、中英文逗号都认、去重、最多 5 个", () => {
+  assert.equal(P.normKeywords(" Jev ,  GPTs，jev , a,b,c,d"), "jev,gpts,a,b,c");
+  assert.equal(P.normKeywords("jev  ai"), "jev ai");
+});
+check("对比网址：q=词1,词2（逗号不转义，和谷歌趋势自己的网址一样）", () => {
+  assert.equal(P.buildTrendsUrl({ keyword: "jev, GPTs", date: "today 12-m" }), "https://trends.google.com/trends/explore?date=today%2012-m&q=jev,gpts");
+  assert.equal(P.buildTrendsUrl({ keyword: "jev ai", date: "today 12-m" }), "https://trends.google.com/trends/explore?date=today%2012-m&q=jev%20ai");
+});
+check("曲线接口：几个 comparisonItem 拼成「词1,词2」，和任务里记的写法对得上", () => {
+  const req = { comparisonItem: [{ complexKeywordsRestriction: { keyword: [{ value: "Jev" }] } }, { complexKeywordsRestriction: { keyword: [{ value: "gpts" }] } }] };
+  assert.equal(P.parseReq("/trends/api/widgetdata/multiline?req=" + encodeURIComponent(JSON.stringify(req))).keyword, "jev,gpts");
+});
+check("对比曲线：每个点 vs = 每个词的值（v 仍是第一个词），没过完的点照样标 p", () => {
+  const r = P.parseTimeline(XSSI + JSON.stringify({ default: { timelineData: [{ time: "1", value: [3, 80] }, { time: "2", value: [100, 40], isPartial: true }] } }));
+  assert.deepEqual(r.points, [{ t: 1, v: 3, vs: [3, 80] }, { t: 2, v: 100, vs: [100, 40], p: 1 }]);
+});
+check("单个词的曲线不带 vs（和以前一样）", () => {
+  const r = P.parseTimeline(XSSI + JSON.stringify({ default: { timelineData: [{ time: "1", value: [3] }] } }));
+  assert.deepEqual(r.points, [{ t: 1, v: 3 }]);
+});
+
 console.log(failed ? "\n" + failed + " 项未通过" : "\n全部通过 ✓");
 process.exit(failed ? 1 : 0);

@@ -1,6 +1,6 @@
 {
   "name": "seo-web-cafe-extension",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "哥飞 SEO Agent 浏览器插件（配合 seo.web.cafe 使用）",
   "scripts": {

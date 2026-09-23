@@ -36,7 +36,7 @@
   <section>
     <h2>谷歌趋势</h2>
     <p class="hint">插件直接去谷歌趋势取数，结果只显示在这里：不经过 Agent、不扣积分、不进网站缓存，方便单独核对。地区不填就是全球。</p>
-    <input id="word" type="text" placeholder="关键词，例如 jev" spellcheck="false" autocomplete="off">
+    <input id="word" type="text" placeholder="关键词，例如 jev；对比用逗号隔开：jev, gpts" spellcheck="false" autocomplete="off">
     <div class="row">
       <select id="range" aria-label="时间范围">
         <option value="today 12-m" selected>过去 12 个月（按周）</option>
@@ -53,7 +53,7 @@
     <button type="button" class="primary" id="trendsGo">查询</button>
     <p id="trendsStatus" class="status" hidden></p>
     <div id="results"></div>
-    <p class="hint" id="trendsNote" hidden>0~100 是相对热度（这段时间里最热的点 = 100），不是搜索量。虚线是还没过完的那个点。</p>
+    <p class="hint" id="trendsNote" hidden>0~100 是相对热度，不是搜索量：每次查询把这一次里最热的那个点记 100，其余按比例折算。所以<b>分开查的两个词不能比高低</b>（各自的 80 不是一样热），要比就用逗号隔开放进同一次查询。虚线是还没过完的那个点。</p>
     <button type="button" id="askWord">问 Agent：这个词是不是新词、值不值得做？</button>
   </section>
 
