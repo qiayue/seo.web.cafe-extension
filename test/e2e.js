@@ -438,13 +438,41 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     await chat.waitForTimeout(1000);
     check("后台再起来：传话脚本活着就不重复补", (await chat.evaluate(() => window.__helloCount)) === h0);
 
-    // 读 Ahrefs：没允许读这个地址（可选站点权限）→ 马上说清楚去哪里点，不开标签页
-    const IDN = "d".repeat(32);
+    // 读 Ahrefs：还没允许读设置里的 Ahrefs 地址（可选站点权限）→ 不马上说失败：在对话页旁边打开「允许」页面等你点
+    // （前面已经把 Ahrefs 地址存成了镜像站 ahrefs.3ue.com）
+    const allowPages = () => context.pages().filter((p) => p.url().startsWith("chrome-extension://" + extId + "/allow/allow.html"));
+    const IDN = "7".repeat(32); // 单号别和前面的场景撞上（页面记着每个单号的结果）
     await chat.evaluate((id) => window.__ahrefs(id, "pollo.ai"), IDN);
+    for (let i = 0; i < 30 && !allowPages().length; i++) await new Promise((r) => setTimeout(r, 100));
+    const allow = allowPages()[0];
+    if (allow) await allow.waitForFunction(() => /ahrefs/.test(document.getElementById("host").textContent), null, { timeout: 5000 }).catch(() => {});
+    await chat.waitForFunction((id) => window.__accepted[id], IDN, { timeout: 5000 }).catch(() => {});
+    const rn0 = await chat.evaluate((id) => ({ acc: !!window.__accepted[id], res: window.__results[id] || null }), IDN);
+    check("读 Ahrefs、还没允许：接单，打开「允许读 ahrefs.3ue.com 的数据」页面等你点，不马上说失败", !!allow && rn0.acc && !rn0.res
+      && /允许读 ahrefs\.3ue\.com 的数据/.test(await allow.textContent("#allow")) && /pollo\.ai/.test(await allow.textContent("#target")));
+    await allow.click("#deny", { noWaitAfter: true }).catch(() => {}); // 点了后台马上关掉这一页：别等点击「收尾」
     await chat.waitForFunction((id) => window.__results[id], IDN, { timeout: 10000 }).catch(() => {});
     const rn = await chat.evaluate((id) => window.__results[id] || null, IDN);
-    // 前面已经把 Ahrefs 地址存成了镜像站：说的是那个地址
-    check("读 Ahrefs：还没允许读设置里的 Ahrefs 地址 → 说去侧边栏「设置」点允许", rn && rn.ok === false && /还没允许插件读 ahrefs\.3ue\.com/.test(rn.error) && /允许读 Ahrefs 数据/.test(rn.error), rn && rn.error);
+    check("点「不允许」：这次不读，说清楚原因（对话里的 Agent 会停下来）；「允许」页面关掉", rn && rn.ok === false && /没允许插件读 ahrefs\.3ue\.com 的页面（你点了「不允许」）/.test(rn.error) && allowPages().length === 0, rn && rn.error);
+    // 关掉「允许」页面也一样
+    const IDC2 = "8".repeat(32);
+    await chat.evaluate((id) => window.__ahrefs(id, "pollo.ai"), IDC2);
+    for (let i = 0; i < 30 && !allowPages().length; i++) await new Promise((r) => setTimeout(r, 100));
+    await allowPages()[0].close();
+    await chat.waitForFunction((id) => window.__results[id], IDC2, { timeout: 10000 }).catch(() => {});
+    const rc2 = await chat.evaluate((id) => window.__results[id] || null, IDC2);
+    check("关掉「允许」页面：同样说没允许", rc2 && rc2.ok === false && /「允许」页面被关掉了/.test(rc2.error), rc2 && rc2.error);
+    // 等「允许」的时候在对话页点了停止：关掉那个页面，单子作废
+    const IDS = "6".repeat(32);
+    await chat.evaluate((id) => window.__ahrefs(id, "pollo.ai"), IDS);
+    for (let i = 0; i < 30 && !allowPages().length; i++) await new Promise((r) => setTimeout(r, 100));
+    await chat.waitForFunction((id) => window.__accepted[id], IDS, { timeout: 5000 }).catch(() => {});
+    await chat.evaluate((id) => window.__cancel(id), IDS);
+    await chat.waitForFunction((id) => window.__results[id], IDS, { timeout: 10000 }).catch(() => {});
+    const rs = await chat.evaluate((id) => window.__results[id] || null, IDS);
+    await new Promise((r) => setTimeout(r, 300));
+    check("等「允许」时点了停止：关掉「允许」页面、单子作废", rs && rs.ok === false && /点了停止/.test(rs.error) && allowPages().length === 0, rs && rs.error);
+    // 点「允许」之后 Chrome 会弹一次权限确认——无头浏览器里点不到那个弹窗，「允许之后接着读」放到下面 ⑪（那边的插件拷贝已有权限）里测
 
     // 对话页请插件对比（Agent 调 google_trends 带 compare）
     const IDC = "c".repeat(32);
@@ -530,6 +558,18 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       const front = await sw2.evaluate(() => chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((t) => (t[0] && t[0].url) || ""));
       check("没登录 Ahrefs：说要先登录，把登录页切到前台", rl && rl.ok === false && /先登录/.test(rl.error) && /\/user\/login/.test(front), (rl && rl.error) + " | " + front);
       for (const p of ahTabs()) await p.close();
+
+      // 允许之后接着读：用一个空白标签页顶替「允许」页面、记一张在等的单子，再发「权限加上了」——
+      // 后台关掉那一页、切回对话页、照常去 Ahrefs 读，结果交回对话页（真浏览器里是用户点了「允许」、Chrome 确认之后走这条）
+      const IDW = "c".repeat(32);
+      const chatTab = await sw2.evaluate(() => chrome.tabs.query({ url: "https://seo.web.cafe/*" }).then((t) => ({ id: t[0].id, windowId: t[0].windowId })));
+      const fakeAllow = await sw2.evaluate(() => chrome.tabs.create({ url: "about:blank", active: true }).then((t) => t.id));
+      await sw2.evaluate(([tabId, id, from]) => chrome.storage.session.set({ allows: { [tabId]: { msg: { type: "trends:fetch", kind: "ahrefs", requestId: id, target: "pollo.ai" }, from: { panel: false, tabId: from.id, windowId: from.windowId }, base: "https://app.ahrefs.com", target: "pollo.ai", at: Date.now() } } }), [fakeAllow, IDW, chatTab]);
+      await sw2.evaluate(() => onAllowGranted());
+      await chat2.waitForFunction((id) => window.__results[id], IDW, { timeout: 40000 }).catch(() => {});
+      const rw = await chat2.evaluate((id) => window.__results[id] || null, IDW);
+      const fakeGone = await sw2.evaluate((id) => chrome.tabs.get(id).then(() => false, () => true), fakeAllow);
+      check("允许之后：关掉「允许」页面、接着去 Ahrefs 读，结果交回对话页", fakeGone && rw && rw.ok && rw.data.series.length === 3, rw && (rw.error || rw.data.series.length));
 
       // 镜像站：在设置里换地址，读数据照样走（侧边栏调试按钮，不经过 Agent）
       await panel2.fill("#ahrefsBase", "https://ahrefs.3ue.com/dashboard");

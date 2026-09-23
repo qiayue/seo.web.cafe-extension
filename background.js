@@ -98,28 +98,102 @@ function startJob(msg, from) {
   });
 }
 
-/** 读 Ahrefs：在你设置的 Ahrefs 地址开这个站的 Site Explorer。没允许读这个地址就说清楚去哪里点 */
+/** 读 Ahrefs：在你设置的 Ahrefs 地址开这个站的 Site Explorer。
+ *  还没允许读这个地址：不马上说失败，而是在旁边打开「允许读 Ahrefs 数据」页面等你点（见 waitForAllow），点了接着读 */
 function startAhrefsJob(msg, from) {
   if (!/^[a-f0-9]{32}$/.test(String(msg.requestId || ""))) return Promise.reject(new Error("取数单号不对"));
   var target = A.normTarget(msg.target);
   if (!target) return Promise.reject(new Error("要看的网站不像域名：" + String(msg.target || "").slice(0, 60)));
   return ahrefsBase().then(function (base) {
-    var host = base.replace(/^https:\/\//, "");
     return chrome.permissions.contains({ origins: [base + "/*"] }).then(function (ok) {
-      if (!ok) throw new Error("还没允许插件读 " + host + " 的页面：打开插件侧边栏 →「设置」→ 点「允许读 Ahrefs 数据」（只要点一次），再回对话页问");
-      return ensureAhrefsScripts();
-    }).then(function () {
-      return serial(function () {
-        return loadJobs().then(function (jobs) {
-          var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
-          return dup ? null : openJob(msg, from, A.siteExplorerUrl(base, target), {
-            fields: { kind: "ahrefs", target: target, home: base + "/", series: [], metrics: {}, text: "", title: "", lastAt: null, firstDataAt: null },
-            label: { keyword: target, range: "Ahrefs · " + host, geo: "" },
-            opened: "已在 " + host + " 打开 " + target + " 的 Site Explorer，等页面加载…",
-            onTimeout: function (tabId) { finishAhrefs(tabId, true); },
-          });
-        });
+      if (!ok) return waitForAllow(msg, from, base, target);
+      return ensureAhrefsScripts().then(function () { return openAhrefsJob(msg, from, base, target); });
+    });
+  });
+}
+function openAhrefsJob(msg, from, base, target) {
+  var host = base.replace(/^https:\/\//, "");
+  return serial(function () {
+    return loadJobs().then(function (jobs) {
+      var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
+      return dup ? null : openJob(msg, from, A.siteExplorerUrl(base, target), {
+        fields: { kind: "ahrefs", target: target, home: base + "/", series: [], metrics: {}, text: "", title: "", lastAt: null, firstDataAt: null },
+        label: { keyword: target, range: "Ahrefs · " + host, geo: "" },
+        opened: "已在 " + host + " 打开 " + target + " 的 Site Explorer，等页面加载…",
+        onTimeout: function (tabId) { finishAhrefs(tabId, true); },
       });
+    });
+  });
+}
+
+// ---------- 还没允许读 Ahrefs：在对话页旁边打开「允许」页面，等你点（最多 2 分钟） ----------
+// Chrome 的权限弹窗只能由用户在插件自己的页面里点出来（后台、内容脚本都弹不了）。以前这里直接说「没允许」，
+// 对话里的 Agent 就转头拿别的数据凑了一篇；现在停下来等你：点了「允许」接着读，点「不允许」/ 关掉页面 / 2 分钟没点才算没读成。
+// 等待中的单子记在 storage.session.allows（按「允许」页面的标签页号），后台被回收了也接得上
+var ALLOW_WAIT_MS = 120000;
+var ALLOW_URL = chrome.runtime.getURL("allow/allow.html");
+function loadAllows() { return chrome.storage.session.get("allows").then(function (r) { return r.allows || {}; }); }
+function saveAllows(a) { return chrome.storage.session.set({ allows: a }); }
+/** 给发起方（对话页标签页 / 侧边栏）发一条消息 */
+function tellFrom(from, m) {
+  if (from.panel) chrome.runtime.sendMessage(m).catch(function () {});
+  else if (from.tabId != null) chrome.tabs.sendMessage(from.tabId, m).catch(function () {});
+}
+function waitForAllow(msg, from, base, target) {
+  var host = base.replace(/^https:\/\//, "");
+  var who = { panel: !!from.panel, tabId: from.tab ? from.tab.id : null, windowId: from.tab ? from.tab.windowId : (Number.isInteger(msg.windowId) ? msg.windowId : null) };
+  return serial(function () {
+    return loadAllows().then(function (allows) {
+      // 同一张单已经在等（对话页刷新后又转来一次）：不再开第二个页面
+      if (Object.keys(allows).some(function (k) { return allows[k].msg.requestId === msg.requestId; })) return null;
+      var opts = { url: ALLOW_URL + "?origin=" + encodeURIComponent(base) + "&target=" + encodeURIComponent(target), active: true };
+      if (who.windowId != null) opts.windowId = who.windowId;
+      if (from.tab) opts.index = from.tab.index + 1;
+      return chrome.tabs.create(opts).then(function (tab) {
+        allows[tab.id] = { msg: msg, from: who, base: base, target: target, at: Date.now() };
+        return saveAllows(allows).then(function () { return tab; });
+      });
+    });
+  }).then(function (tab) {
+    if (!tab) return;
+    var text = "还没允许插件读 " + host + "：已在旁边打开「允许读 Ahrefs 数据」页面，点了就接着读（等你 2 分钟）";
+    tellFrom(who, { type: "trends:progress", requestId: msg.requestId, stage: "allow", text: text });
+    logActivity(msg.requestId, { keyword: target, range: "Ahrefs · " + host, geo: "", from: who.panel ? "侧边栏" : "对话页", stage: "allow", text: "等你允许读 " + host + "…" });
+    setTimeout(function () { endAllow(tab.id, false, "2 分钟内没点「允许」"); }, ALLOW_WAIT_MS);
+  });
+}
+/** 等待结束：允许了就回到对话页、接着去 Ahrefs 读；没允许就把原因交回去（对话里的 Agent 会停下来说明） */
+function endAllow(allowTabId, granted, why) {
+  return serial(function () {
+    return loadAllows().then(function (allows) {
+      var a = allows[allowTabId];
+      if (!a) return null;
+      delete allows[allowTabId];
+      return saveAllows(allows).then(function () { return a; });
+    });
+  }).then(function (a) {
+    if (!a) return;
+    chrome.tabs.remove(allowTabId).catch(function () {});
+    var host = a.base.replace(/^https:\/\//, "");
+    var originTab = a.from.tabId != null ? chrome.tabs.get(a.from.tabId).catch(function () { return null; }) : Promise.resolve(null);
+    return originTab.then(function (tab) {
+      if (!a.from.panel && !tab) return; // 对话页已经关了：没人收
+      var from = a.from.panel ? { panel: true, tab: null } : { tab: tab };
+      var fail = function (error) {
+        tellFrom(a.from, { type: "trends:result", requestId: a.msg.requestId, ok: false, data: null, error: error });
+        logActivity(a.msg.requestId, { endedAt: Date.now(), ok: false, error: error, stage: "failed", text: "" });
+      };
+      if (!granted) return fail("没允许插件读 " + host + " 的页面（" + why + "），这次没读 Ahrefs");
+      if (tab) chrome.tabs.update(tab.id, { active: true }).catch(function () {}); // 回到对话页，看着它接着读
+      return startAhrefsJob(a.msg, from).catch(function (e) { fail(String((e && e.message) || e)); });
+    });
+  });
+}
+/** 权限加上了（在「允许」页面点的，或者在侧边栏「设置」里点的）：所有在等这个地址的单子接着读 */
+function onAllowGranted() {
+  return loadAllows().then(function (allows) {
+    Object.keys(allows).forEach(function (k) {
+      chrome.permissions.contains({ origins: [allows[k].base + "/*"] }).then(function (ok) { if (ok) endAllow(Number(k), true); }, function () {});
     });
   });
 }
@@ -323,7 +397,7 @@ function ensureAhrefsScripts() {
   }).catch(function () { return false; });
 }
 ensureAhrefsScripts();
-if (chrome.permissions.onAdded) chrome.permissions.onAdded.addListener(function () { ensureAhrefsScripts(); });
+if (chrome.permissions.onAdded) chrome.permissions.onAdded.addListener(function () { ensureAhrefsScripts().then(onAllowGranted); });
 if (chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(function () { ensureAhrefsScripts(); });
 chrome.storage.onChanged.addListener(function (changes, area) { if (area === "local" && changes.ahrefsBase) ensureAhrefsScripts(); });
 
@@ -343,6 +417,12 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   }
   if (msg.type === "trends:captured" && sender.tab) { onCaptured(sender.tab.id, msg); return false; }
   if (msg.type === "ahrefs:captured" && sender.tab) { onAhrefsCaptured(sender.tab.id, msg); return false; }
+  if ((msg.type === "ahrefs:allowed" || msg.type === "ahrefs:denied") && sender.tab && sender.id === chrome.runtime.id && String(sender.url || "").indexOf(ALLOW_URL) === 0) {
+    // 「允许」页面的两个按钮：允许了（权限已经加上）→ 接着读；不允许 → 这次不读
+    if (msg.type === "ahrefs:allowed") ensureAhrefsScripts().then(function () { endAllow(sender.tab.id, true); });
+    else endAllow(sender.tab.id, false, "你点了「不允许」");
+    return false;
+  }
   if (msg.type === "ahrefs:hello" && sender.tab) {
     // Ahrefs 页面里的脚本问「我是不是你开的取数标签页」：不是就什么都别发
     loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; sendResponse({ job: !!(j && j.kind === "ahrefs") }); }, function () { sendResponse({ job: false }); });
@@ -354,6 +434,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     if (okSender) loadJobs().then(function (jobs) {
       Object.keys(jobs).forEach(function (k) { if (jobs[k].requestId === msg.requestId) finish(Number(k), { ok: false, error: "已取消（点了停止）" }, false, true); });
     });
+    // 还在等「允许」的：关掉那个页面，单子作废
+    if (okSender) loadAllows().then(function (allows) {
+      Object.keys(allows).forEach(function (k) { if (allows[k].msg.requestId === msg.requestId) endAllow(Number(k), false, "点了停止"); });
+    });
     return false;
   }
   return false;
@@ -362,7 +446,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // 取数的标签页被关掉了 / 被跳到了别处（manifest 只给了 trends.google.com 的站点权限：
 // 谷歌的人机验证页 www.google.com/sorry 不在其中，tab.url 会是空的）
 chrome.tabs.onRemoved.addListener(function (tabId) {
-  loadJobs().then(function (jobs) { if (jobs[tabId]) finish(tabId, { ok: false, error: "取数的谷歌趋势标签页被关掉了" }); });
+  loadJobs().then(function (jobs) { if (jobs[tabId]) finish(tabId, { ok: false, error: jobs[tabId].kind === "ahrefs" ? "读 Ahrefs 的标签页被关掉了" : "取数的谷歌趋势标签页被关掉了" }); });
+  endAllow(tabId, false, "「允许」页面被关掉了"); // 不是「允许」页面就什么都不做
 });
 chrome.tabs.onUpdated.addListener(function (tabId, info, tab) {
   if (info.status !== "complete") return;
