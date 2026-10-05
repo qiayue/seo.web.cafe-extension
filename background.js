@@ -518,17 +518,36 @@ function onCaptureItem(tabId, msg) {
         via: msg.via === "xhr" ? "xhr" : "fetch", method: String(msg.method || "GET").slice(0, 10), reqHeaders: msg.reqHeaders && typeof msg.reqHeaders === "object" ? msg.reqHeaders : {} });
       var body = typeof msg.body === "string" ? msg.body : "";
       var want = !!body && (!job.match || new RegExp(job.match).test(url));
-      var first = false;
-      if (want && job.items.length < job.maxItems && body.length <= G.MAX_ITEM_BODY && job.bytes + body.length <= G.MAX_TOTAL) {
+      var first = false, stop = "";
+      var ex = job.extract && G.EXTRACTORS[job.extract];
+      if (want && ex && ex.page) {
+        // 带解析器：先看这一页完不完整（要升级才看得到的列 → 停止翻页、这一页丢掉），完整的当场整理成行，原始数据不留
+        var chk = ex.check ? ex.check(body) : { complete: true };
+        if (chk && !chk.complete && !job.pagerEnd) {
+          stop = "第 " + (job.pagesDone + 1) + " 页起数据不完整（" + chk.locked + "/" + chk.rows + " 行要升级才看得到），已停止翻页，这一页丢掉";
+          job.pagerEnd = stop;
+        } else if (chk && chk.complete && !job.pagerEnd) {
+          var parsed = null;
+          try { parsed = ex.page(body, url); } catch (e) {}
+          var size = parsed ? JSON.stringify(parsed.rows).length : 0;
+          if (parsed && job.bytes + size > G.MAX_TOTAL) { stop = "数据量到上限（已整理 " + job.items.length + " 页），停止翻页"; job.pagerEnd = stop; }
+          else if (parsed) {
+            first = !job.items.length;
+            job.items.push({ url: url, status: Number(msg.status) || 0, page: job.pagesDone, parsed: parsed });
+            job.bytes += size;
+          }
+        }
+      } else if (want && job.items.length < job.maxItems && body.length <= G.MAX_ITEM_BODY && job.bytes + body.length <= G.MAX_TOTAL) {
         first = !job.items.length;
         job.items.push({ url: url, status: Number(msg.status) || 0, page: job.pagesDone, body: body });
         job.bytes += body.length;
       }
       job.lastAt = Date.now();
-      return saveJobs(jobs).then(function () { return { job: job, first: first }; });
+      return saveJobs(jobs).then(function () { return { job: job, first: first, stop: stop }; });
     });
   }).then(function (r) {
     if (!r) return;
+    if (r.stop) { notify(r.job, "stop", r.stop); return finishCapture(tabId, false); }
     if (r.first) notify(r.job, "data", "截到数据了，等页面加载完…");
     scheduleCaptureCheck(tabId, r.job.quietMs);
   });
@@ -552,7 +571,7 @@ function captureCheck(tabId) {
         return loadJobs().then(function (jobs2) { var j = jobs2[tabId]; if (j) { j.pagerEnd = "点了下一页没有新数据（到底了，或账号只能看到这么多）"; return saveJobs(jobs2); } });
       }).then(function () { return finishCapture(tabId, false); });
     }
-    if (job.pager && !job.pagerEnd && job.pagesDone < job.pager.times && job.items.length < job.maxItems) return turnPage(tabId);
+    if (job.pager && !job.pagerEnd && job.pagesDone < job.pager.times && (job.extract || job.items.length < job.maxItems)) return turnPage(tabId);
     return finishCapture(tabId, false);
   });
 }
@@ -667,7 +686,7 @@ ensureCaptureScripts();
 // 配对令牌、开关存在 storage.local（agentToken / agentOn / agentServer）；每分钟一次闹钟（chrome.alarms，worker 被回收也照样叫醒）。
 // 一次只做一张：正在做的记在 storage.session.agentRunning，做完马上领下一张；卡住超过 6 分钟的不再等
 var AGENT_ALARM = "gefei-agent-poll";
-var AGENT_STUCK_MS = 6 * 60000;
+var AGENT_STUCK_MS = 35 * 60000; // 一直往后翻的任务最长 30 分钟
 function agentConf() {
   return chrome.storage.local.get(["agentToken", "agentOn", "agentServer"]).then(function (r) {
     var server = G.AGENT_SERVERS.indexOf(r.agentServer) >= 0 ? r.agentServer : G.AGENT_SERVERS[0];
