@@ -45,12 +45,12 @@ const pairPage = `<!doctype html><title>插件任务</title><script>
   window.__ext = function () { return document.documentElement.getAttribute("data-gefei-seo-agent"); };
 </script>`;
 // 假的 Similarweb：单页应用，自己用 fetch（第 1 页）和 XHR（之后几页）请求着陆页数据，「下一页」按钮翻页，第 3 页之后变灰
-const swPage = `<!doctype html><title>Similarweb (mock)</title><main><table id=t></table><button class="next" type=button>›</button></main><script>
+const swPage = `<!doctype html><title>Similarweb (mock)</title><main><table id=t></table><div class="pager"><span>1 out of 3</span><button class="next" type=button>›</button></div></main><script>
   var page = 1;
   function show(d) { document.getElementById("t").innerHTML = d.rows.map(function (r) { return "<tr><td>" + r + "</td></tr>"; }).join(""); if (d.page >= 3) document.querySelector("button.next").disabled = true; }
   function load() {
     if (page === 1) fetch("/api/landing?page=1", { credentials: "include" }).then(function (r) { return r.json(); }).then(show);
-    else { var x = new XMLHttpRequest(); x.open("GET", "/api/landing?page=" + page); x.onload = function () { show(JSON.parse(x.responseText)); }; x.send(); }
+    else { var x = new XMLHttpRequest(); x.open("GET", "/api/landing?page=" + page); x.setRequestHeader("x-sw-page", "landing"); x.setRequestHeader("Authorization", "Bearer secret"); x.onload = function () { show(JSON.parse(x.responseText)); }; x.send(); }
     fetch("/api/other").then(function (r) { return r.json(); });
   }
   document.querySelector("button.next").addEventListener("click", function () { page++; load(); });
@@ -162,6 +162,8 @@ async function waitReport(rid, ms = 40000) {
     check("capture：截到页面自己请求的数据（fetch 与 XHR 都截得到），一路翻到最后一页", r1 && r1.ok && pagesGot.join() === "1,2,3", r1 && (r1.error || pagesGot.join()));
     check("官方地址：开的是 pro.similarweb.com", items.length && JSON.parse(items[0].body).host === "pro.similarweb.com");
     check("match 之外的接口只记进清单、不收数据；翻到底说明原因", r1 && r1.data.seen.some((s) => /\/api\/other/.test(s.url)) && !items.some((x) => /other/.test(x.url)) && r1.data.pagerEnd === "已经是最后一页", r1 && r1.data.pagerEnd);
+    const xhrSeen = r1 && r1.data.seen.find((x) => /page=2/.test(x.url));
+    check("记下页面自己发请求带的请求头（Authorization 只记有没有，不记值）", xhrSeen && xhrSeen.via === "xhr" && xhrSeen.reqHeaders["x-sw-page"] === "landing" && !/secret/.test(JSON.stringify(xhrSeen.reqHeaders)), JSON.stringify(xhrSeen && xhrSeen.reqHeaders));
     check("进度报给了 new.web.cafe（页面加载 / 翻页）", reports.some((x) => x.requestId === id("1") && x.stage === "progress" && /翻到第 2 页/.test(x.note)));
     await sleep(800);
     check("做完关掉标签页", swTabs().length === 0, swTabs().map((p) => p.url()).join());
@@ -176,6 +178,15 @@ async function waitReport(rid, ms = 40000) {
     const b2 = res2.map((x) => JSON.parse(x.body || "{}"));
     check("镜像站：设置成 sim.3ue.com 后任务开的是镜像站", b2.length === 2 && b2.every((b) => b.host === "sim.3ue.com"), r2 && (r2.error || JSON.stringify(b2[0] || {})));
     check("fetch：在页面里带着这个网站的登录态请求（Cookie 跟着走）", b2.length === 2 && b2[0].page === 4 && b2[1].page === 5 && /sw_session=sim\.3ue\.com/.test(b2[0].cookie), b2[0] && b2[0].cookie);
+
+    // ③b fetch 走页面自己的 XHR；page 带回某段文字附近的 HTML（找翻页按钮用）
+    queue.push({ requestId: id("4"), kind: "fetch", site: "similarweb", path: "/", transport: "xhr", requests: ["/api/landing?page=6"], delayMs: 300 });
+    queue.push({ requestId: id("5"), kind: "page", site: "similarweb", path: "/", around: "out of", minMs: 1500 });
+    await sw.evaluate(() => agentPoll());
+    const r4 = await waitReport(id("4"));
+    check("fetch 也能走页面自己的 XHR", r4 && r4.ok && JSON.parse(r4.data.results[0].body).page === 6, r4 && r4.error);
+    const r5 = await waitReport(id("5"));
+    check("page 带回 \"out of\" 附近那一块 HTML（看得到翻页按钮）", r5 && r5.ok && /class="next"/.test(r5.data.around || ""), r5 && (r5.error || String(r5.data.around).slice(0, 80)));
 
     // ④ 不认识的网站
     queue.push({ requestId: id("3"), kind: "page", site: "gmail", path: "/" });

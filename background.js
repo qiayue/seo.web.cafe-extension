@@ -371,7 +371,7 @@ function startPageJob(msg, from) {
         return dup ? null : openJob(msg, from, url, {
           noMark: true,
           // minMs：加载完之后至少再等这么久才算读完（GSC 这类一块一块填数据的报告页用，最多 15 秒）
-          fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)) },
+          fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)), around: from.agent ? String(msg.around || "").slice(0, 100) : "" },
           label: { keyword: host, range: "打开网页", geo: "" },
           opened: "已在后台打开 " + host + "，等页面加载…",
           onTimeout: function (tabId) { finishPage(tabId, true); },
@@ -386,7 +386,7 @@ function schedulePagePoll(tabId) {
     loadJobs().then(function (jobs) {
       var job = jobs[tabId];
       if (!job || job.kind !== "page") return;
-      chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.extractPage, args: [R.MAX_TEXT, R.MAX_HTML] }).then(function (res) {
+      chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.extractPage, args: [R.MAX_TEXT, R.MAX_HTML, job.around || ""] }).then(function (res) {
         var page = res && res[0] && res[0].result;
         return serial(function () {
           return loadJobs().then(function (jobs2) {
@@ -496,7 +496,7 @@ function startRemoteJob(msg, from) {
             fields: capture
               ? { kind: "capture", origin: origin, match: msg.match || "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
                 items: [], seen: [], bytes: 0, lastAt: null, pagesDone: 0, pagerEnd: "", loginSeen: false }
-              : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, fetching: false },
+              : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, transport: msg.transport === "xhr" ? "xhr" : "fetch", fetching: false },
             label: { keyword: host, range: capture ? "截数据" + (msg.pager ? "（翻页）" : "") : "请求接口 ×" + msg.requests.length, geo: "" },
             opened: "已在后台打开 " + host + "，等页面加载…",
             onTimeout: function (tabId) { if (capture) finishCapture(tabId, true); else finish(tabId, { ok: false, error: Math.round((msg.timeoutMs || JOB_TIMEOUT_MS) / 1000) + " 秒内没请求完——已把那个标签页切到前台，看一眼就知道" }, true); },
@@ -514,7 +514,8 @@ function onCaptureItem(tabId, msg) {
       var job = jobs[tabId];
       if (!job || job.kind !== "capture") return null;
       var url = String(msg.url || "").slice(0, 2000);
-      if (job.seen.length < G.MAX_SEEN) job.seen.push({ url: url, status: Number(msg.status) || 0, ct: String(msg.ct || "").slice(0, 100), size: Number(msg.size) || 0, page: job.pagesDone });
+      if (job.seen.length < G.MAX_SEEN) job.seen.push({ url: url, status: Number(msg.status) || 0, ct: String(msg.ct || "").slice(0, 100), size: Number(msg.size) || 0, page: job.pagesDone,
+        via: msg.via === "xhr" ? "xhr" : "fetch", method: String(msg.method || "GET").slice(0, 10), reqHeaders: msg.reqHeaders && typeof msg.reqHeaders === "object" ? msg.reqHeaders : {} });
       var body = typeof msg.body === "string" ? msg.body : "";
       var want = !!body && (!job.match || new RegExp(job.match).test(url));
       var first = false;
@@ -609,7 +610,7 @@ function runFetch(tabId) {
     return chrome.tabs.get(tabId).then(function (t) {
       // 跳到了别的网站（多半是登录页）：不在那边请求
       if (!t || !t.url || new URL(t.url).origin !== job.origin) throw new Error("页面跳到了 " + (t && t.url ? new URL(t.url).host : "别处") + "（多半要登录）");
-      return chrome.scripting.executeScript({ target: { tabId: tabId }, world: "MAIN", func: G.fetchInPage, args: [job.requests, job.delayMs, G.MAX_ITEM_BODY, G.MAX_TOTAL] });
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, world: "MAIN", func: G.fetchInPage, args: [job.requests, job.delayMs, G.MAX_ITEM_BODY, G.MAX_TOTAL, job.transport || "fetch"] });
     }).then(function (res) {
       var results = (res && res[0] && res[0].result) || [];
       var okN = results.filter(function (r) { return r.status >= 200 && r.status < 300; }).length;
