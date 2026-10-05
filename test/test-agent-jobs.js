@@ -37,8 +37,8 @@ check("fetch：只请求同一个网站的路径，Cookie / Authorization 请求
   bad({ requestId: ID, kind: "fetch", site: "similarweb", path: "/", requests: ["https://evil.com/a"] });
 });
 check("capture：翻页要有按钮选择器，次数有上限", () => {
-  const j = G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pager: { selector: "button[aria-label=next]", times: 500 } }, {});
-  assert.equal(j.pager.times, 60);
+  const j = G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pager: { selector: "button[aria-label=next]", times: 5000 } }, {});
+  assert.equal(j.pager.times, 400);
   bad({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pager: { selector: " " } });
   bad({ requestId: ID, kind: "capture", site: "similarweb", path: "/", match: "(" });
 });
@@ -63,6 +63,14 @@ check("带解析器的任务：没写 match 就用解析器自己的；不认识
   const j = G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", extract: "sw_landing", pager: { near: "out of", times: 4 } }, {});
   assert.ok(/LandingPages/.test(j.match) && j.pager.near === "out of" && j.pager.selector === "");
   bad({ requestId: ID, kind: "capture", site: "similarweb", path: "/", extract: "evil" });
+});
+check("要升级才看得到的数据：两成以上的行被锁（网址打码 / 没有点击数 / 写着升级）就算这一页不完整；被锁的行不要", () => {
+  const ok = { Url: "a.vercel.app/", Clicks: 10, TopKeyword: "x" };
+  const lockedUrl = { Url: "*****.vercel.app", Clicks: 10 }, noClicks = { Url: "b.vercel.app", Clicks: null }, upsell = { Url: "c.vercel.app", Clicks: 1, TopKeyword: "Upgrade to see" };
+  assert.equal(G.swPageCheck({ Data: [ok, ok, ok, ok, ok, ok, ok, ok, ok, lockedUrl] }).complete, true);
+  assert.equal(G.swPageCheck({ Data: [ok, ok, ok, lockedUrl, noClicks, upsell] }).complete, false);
+  assert.equal(G.swPageCheck({ Data: [] }).complete, false);
+  assert.deepEqual(G.swLandingRows({ Data: [ok, lockedUrl, noClicks, upsell] }).map((r) => r.url), ["a.vercel.app/"]);
 });
 console.log(failed ? "\n" + failed + " 项未通过" : "\n全部通过 ✓");
 process.exit(failed ? 1 : 0);

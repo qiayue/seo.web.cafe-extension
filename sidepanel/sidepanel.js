@@ -525,7 +525,7 @@
         var who = r.agentAccount ? "（管理员 " + r.agentAccount + "）" : "";
         lines.push(on ? "已连接 new.web.cafe" + who + (st.at ? "，" + ago(st.at) + "去领过任务" : "，等第一次去领任务") + "。" : "已连接" + who + "，但现在不接任务（勾上上面那个框才接）。");
         if (st.error) lines.push("⚠ " + st.error);
-        if (st.current && st.current.at && Date.now() - st.current.at < 6 * 60000 && !(st.lastDone && st.lastDone.id === st.current.id)) lines.push("正在做：" + st.current.kind + " " + String(st.current.url || "").replace(/^https:\/\//, "").slice(0, 60));
+        if (st.current && st.current.at && Date.now() - st.current.at < 35 * 60000 && !(st.lastDone && st.lastDone.id === st.current.id)) lines.push("正在做：" + st.current.kind + " " + String(st.current.url || "").replace(/^https:\/\//, "").slice(0, 60));
         if (st.lastDone) lines.push("上一张（" + ago(st.lastDone.at) + "）：" + (st.lastDone.ok ? "交回了" : "没取到——" + (st.lastDone.error || "原因不明")));
       }
       $("agentState").textContent = lines.join(" ");

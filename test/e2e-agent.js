@@ -90,6 +90,8 @@ function handle(req, res) {
     }
     if (u.pathname === "/api/websiteOrganicLandingPagesV2") {
       const p = Number(u.searchParams.get("page")) || 1;
+      // 第 3 页起要升级才看得到：网址打码、点击数没有（插件应停止翻页、这一页丢掉）
+      if (p >= 3) return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map(() => ({ Url: "*****.github.io", Clicks: null, TopKeyword: "" })) }));
       return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map((i) => ({ Url: "s" + p + i + ".github.io/x", Clicks: 100 * p + i,
         PrevClicks: 0, ClicksChange: 1, ClicksShare: 0.001, KeywordsCount: 3, TopKeyword: "kw" + p + i, ChangeState: "New", Trend: { "2026-09-25": 5 } })) }));
     }
@@ -209,8 +211,9 @@ async function waitReport(rid, ms = 40000) {
     await sw.evaluate(() => agentPoll());
     const r6 = await waitReport(id("6"), 60000);
     const d6 = (r6 && r6.data) || {};
-    check("sw_landing：按「out of」后面的箭头一路翻完，交回整理好的行（没有原始数据）", r6 && r6.ok && (d6.rows || []).length === 6 && d6.total === 350121 && d6.pages === 4 && /没有新数据/.test(d6.pagerEnd) && !d6.items && !d6.seen
-      && d6.rows[5].url === "s32.github.io/x" && d6.rows[0].topKeyword === "kw11" && d6.period.latest === "28d", r6 && (r6.error || JSON.stringify(d6).slice(0, 200)));
+    check("sw_landing：按「out of」后面的箭头往后翻，交回整理好的行（没有原始数据）", r6 && r6.ok && (d6.rows || []).length === 4 && d6.total === 350121 && !d6.items && !d6.seen
+      && d6.rows[3].url === "s22.github.io/x" && d6.rows[0].topKeyword === "kw11" && d6.period.latest === "28d", r6 && (r6.error || JSON.stringify(d6).slice(0, 200)));
+    check("翻到要升级才看得到的那一页：停止翻页，这一页整页丢掉，说清楚原因", r6 && /第 3 页起数据不完整（2\/2 行要升级才看得到）/.test(d6.pagerEnd) && !d6.rows.some((r) => /\*/.test(r.url)), d6.pagerEnd);
 
     // ④ 不认识的网站
     queue.push({ requestId: id("3"), kind: "page", site: "gmail", path: "/" });
