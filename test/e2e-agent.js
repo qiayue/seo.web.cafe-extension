@@ -70,6 +70,15 @@ const lpPage = `<!doctype html><title>着陆页</title><main><table id=t></table
   document.querySelector(".nx").addEventListener("click", function () { if (flaky) { flaky = false; return; } if (page < 3) { page++; load(); } });
   setTimeout(load, 300);
 </script>`;
+// 假的 Similarweb「引荐流量」：页面一打开同时请求导入表和导出表（接口形状照线上），任务只要导出的那张
+const refPage = `<!doctype html><title>引荐流量</title><main>referrals</main><script>
+  function get(u) { var x = new XMLHttpRequest(); x.open("GET", u); x.send(); }
+  setTimeout(function () {
+    get("/api/websiteanalysis/GetTrafficSourcesTotalReferralsTable?key=checkout.stripe.com&country=999&from=2026%7C08%7C01&to=2026%7C08%7C31&isWindow=false");
+    get("/api/websiteanalysis/GetOutgoingTable?country=999&from=2026%7C08%7C01&isWWW=false&isWindow=false&key=checkout.stripe.com&to=2026%7C08%7C31");
+  }, 300);
+</script>`;
+const refRec = (d, kids) => ({ Domain: d, Share: 0.05, TotalVisits: 1000, Change: 0.1, NewChange: false, Rank: 100, Category: "Tech", TotalSharePerMonth: [], ...(kids ? { Children: kids } : {}) });
 function handle(req, res) {
   const host = String(req.headers.host || "").split(":")[0];
   const u = new URL(req.url, "https://" + host);
@@ -106,6 +115,10 @@ function handle(req, res) {
       return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map((i) => ({ Url: "s" + p + i + ".github.io/x", Clicks: 100 * p + i,
         PrevClicks: 0, ClicksChange: 1, ClicksShare: 0.001, KeywordsCount: 3, TopKeyword: "kw" + p + i, ChangeState: "New", Trend: { "2026-09-25": 5 } })) }));
     }
+    if (u.pathname === "/api/websiteanalysis/GetTrafficSourcesTotalReferralsTable") return send(200, "application/json", JSON.stringify({ TotalCount: 2, TotalVisits: 9, Categories: { x: [] }, Records: [refRec("in-a.com"), refRec("in-b.com")] }));
+    if (u.pathname === "/api/websiteanalysis/GetOutgoingTable") return send(200, "application/json", JSON.stringify({ TotalCount: 3, TotalVisits: 99, Topics: [{ Name: "t" }],
+      Records: [refRec("link.com", [refRec("checkout.link.com"), refRec("link.com")]), refRec("higgsfield.ai"), refRec("suno.com")] }));
+    if (u.pathname === "/ref") return send(200, "text/html; charset=utf-8", refPage);
     if (u.pathname === "/lp" || u.pathname === "/lp429" || u.pathname === "/lpflaky") return send(200, "text/html; charset=utf-8", lpPage);
     if (u.pathname === "/api/other") return send(200, "application/json", JSON.stringify({ other: true }));
     if (u.pathname === "/") {
@@ -234,6 +247,14 @@ async function waitReport(rid, ms = 40000) {
     await sw.evaluate(() => agentPoll(true));
     const r9 = await waitReport(id("9"), 120000);
     check("点了下一页没反应：再等等、再点一次，照样翻到第 2 页", r9 && r9.ok && (r9.data.rows || []).length === 4 && reports.some((x) => x.requestId === id("9") && /再点一次下一页/.test(x.note || "")), r9 && (r9.error || (r9.data.rows || []).length));
+
+    // ③c3 收款渠道的导出流量：页面同时请求导入、导出两张表，match 只挑导出的；一次就全回来，不翻页
+    queue.push({ requestId: id("a"), kind: "capture", site: "similarweb", path: "/ref", extract: "sw_referrals", match: "GetOutgoingTable", quietMs: 1500, minMs: 0 });
+    await sw.evaluate(() => agentPoll(true));
+    const ra = await waitReport(id("a"), 60000);
+    const da = (ra && ra.data) || {};
+    check("sw_referrals：只交导出表整理好的行（子域名在 children），不带分类 / 话题 / 原始数据", ra && ra.ok && da.direction === "out" && (da.rows || []).map((r) => r.domain).join() === "link.com,higgsfield.ai,suno.com"
+      && da.rows[0].children.length === 2 && da.total === 3 && da.period.from === "2026|08|01" && !da.items && !/Topics|in-a\.com/.test(JSON.stringify(da)), ra && (ra.error || JSON.stringify(da).slice(0, 200)));
 
     // ③d 在 new.web.cafe 被撤销：插件下一次报进度时听说了，停下、关掉标签页
     cancelIds.add(id("7"));

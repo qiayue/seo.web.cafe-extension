@@ -72,6 +72,27 @@ check("要升级才看得到的数据：两成以上的行被锁（网址打码 
   assert.equal(G.swPageCheck({ Data: [] }).complete, false);
   assert.deepEqual(G.swLandingRows({ Data: [ok, lockedUrl, noClicks, upsell] }).map((r) => r.url), ["a.vercel.app/"]);
 });
+check("Similarweb 引荐流量（收款渠道的导入 / 导出）：只留 Records 里的网站、占比、访问量、环比，导出表的子域名放 children，又大又没用的分类 / 话题不要", () => {
+  const rec = (d, kids) => ({ Domain: d, Share: 0.1, TotalVisits: 1234.5, Change: -0.2, NewChange: false, Rank: 1228, Category: "Computers", Favicon: "https://x/y.png",
+    TotalSharePerMonth: [{ Key: "2026-08-01", Value: 0.1 }], SiteOrigins: { "checkout.stripe.com": 1 }, ...(kids ? { Children: kids } : {}) });
+  const out = { url: "https://sim.3ue.com/api/websiteanalysis/GetOutgoingTable?country=999&from=2026%7C08%7C01&to=2026%7C08%7C31&isWindow=false&key=checkout.stripe.com", page: 0,
+    body: JSON.stringify({ TotalCount: 946, TotalVisits: 15962159.1, Categories: { big: [1, 2, 3] }, Topics: [{ Name: "x" }],
+      Records: [rec("Higgsfield.ai", [rec("higgsfield.ai"), { ...rec("clerk.higgsfield.ai"), NewChange: true, Rank: -1 }]), rec("suno.com"), rec("suno.com"), { Domain: "", Share: 0.01 }] }) };
+  const x = G.runExtract("sw_referrals", [out]);
+  assert.equal(x.direction, "out");
+  assert.equal(x.total, 946);
+  assert.equal(Math.round(x.totalVisits), 15962159);
+  assert.deepEqual(x.rows.map((r) => r.domain), ["higgsfield.ai", "suno.com"]);
+  assert.deepEqual(x.rows[0].children.map((c) => [c.domain, c.isNew, c.rank]), [["higgsfield.ai", false, 1228], ["clerk.higgsfield.ai", true, null]]);
+  assert.deepEqual(x.period, { from: "2026|08|01", to: "2026|08|31", latest: "", isWindow: false, key: "checkout.stripe.com" });
+  assert.ok(!JSON.stringify(x).includes("Favicon") && !JSON.stringify(x).includes("Topics"));
+  const inc = { ...out, url: out.url.replace("GetOutgoingTable", "GetTrafficSourcesTotalReferralsTable") };
+  assert.equal(G.runExtract("sw_referrals", [inc]).direction, "in");
+  assert.equal(G.EXTRACTORS.sw_referrals.check(out.body).complete, true);
+  assert.equal(G.EXTRACTORS.sw_referrals.check("{}").complete, false);
+  const j = G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/#/digitalsuite/websiteanalysis/referrals/*/999/1m?key=checkout.stripe.com", extract: "sw_referrals" }, {});
+  assert.ok(/GetOutgoingTable/.test(j.match) && !j.pager);
+});
 check("节奏：任务写 pace: fast 就用快一点的（照样随机、照样歇），其它一律按正常节奏", () => {
   assert.equal(G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pace: "fast" }, {}).pace, "fast");
   assert.equal(G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pace: "turbo" }, {}).pace, "normal");
