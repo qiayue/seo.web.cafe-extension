@@ -21,9 +21,23 @@
   function sameSite(url) {
     try { return new URL(url, location.href).origin === location.origin; } catch (e) { return false; }
   }
-  function record(url, status, ct, body) {
+  // 页面发请求时带的请求头（0.11.1 起，摸接口用：有的网站 / 镜像站要页面自己加的头才肯回数据）。Cookie 不记；Authorization 这类只记有没有
+  var SECRET = /^(cookie|authorization|x-csrf-token|x-xsrf-token)$/i;
+  function headerObj(h) {
+    var out = {};
+    try {
+      if (!h) return out;
+      if (typeof h.forEach === "function" && !Array.isArray(h)) h.forEach(function (v, k) { out[k] = v; });
+      else if (Array.isArray(h)) h.forEach(function (kv) { out[kv[0]] = kv[1]; });
+      else Object.keys(h).forEach(function (k) { out[k] = h[k]; });
+    } catch (e) {}
+    Object.keys(out).forEach(function (k) { out[k] = SECRET.test(k) ? "(有，值不记)" : String(out[k]).slice(0, 300); });
+    return out;
+  }
+  function record(url, status, ct, body, meta) {
     if (state === false) return;
-    var d = { source: "gefei-seo-capture", url: String(url).slice(0, 2000), status: status, ct: String(ct || "").slice(0, 100), size: body ? body.length : 0 };
+    var d = { source: "gefei-seo-capture", url: String(url).slice(0, 2000), status: status, ct: String(ct || "").slice(0, 100), size: body ? body.length : 0,
+      via: meta && meta.via, method: meta && meta.method, reqHeaders: meta && meta.headers };
     if (body && /json/i.test(ct || "") && body.length <= MAX_BODY) d.body = body;
     emit(d);
   }
@@ -35,20 +49,27 @@
       try {
         var url = typeof input === "string" ? input : (input && input.url) || "";
         if (state !== false && sameSite(url)) {
+          var init = arguments[1] || {};
+          var meta = { via: "fetch", method: String(init.method || (input && input.method) || "GET").toUpperCase(),
+            headers: headerObj(init.headers || (input && typeof input === "object" && input.headers)) };
           p.then(function (res) {
             var ct = res.headers.get("content-type") || "";
-            if (!/json/i.test(ct)) { record(res.url || url, res.status, ct, ""); return; }
-            res.clone().text().then(function (body) { record(res.url || url, res.status, ct, body); }, function () {});
+            if (!/json/i.test(ct)) { record(res.url || url, res.status, ct, "", meta); return; }
+            res.clone().text().then(function (body) { record(res.url || url, res.status, ct, body, meta); }, function () {});
           }, function () {});
         }
       } catch (e) {}
       return p;
     };
   }
-  var open = XMLHttpRequest.prototype.open, sendXhr = XMLHttpRequest.prototype.send;
+  var open = XMLHttpRequest.prototype.open, sendXhr = XMLHttpRequest.prototype.send, setHeader = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.open = function (method, url) {
-    try { this.__gefeiCapUrl = String(url || ""); } catch (e) {}
+    try { this.__gefeiCapUrl = String(url || ""); this.__gefeiCapMethod = String(method || "GET").toUpperCase(); this.__gefeiCapHeaders = {}; } catch (e) {}
     return open.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    try { if (this.__gefeiCapHeaders) this.__gefeiCapHeaders[k] = v; } catch (e) {}
+    return setHeader.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function () {
     var xhr = this;
@@ -58,7 +79,7 @@
           var ct = xhr.getResponseHeader("content-type") || "";
           var body = !/json/i.test(ct) ? "" : xhr.responseType === "" || xhr.responseType === "text" ? xhr.responseText
             : xhr.responseType === "json" ? JSON.stringify(xhr.response) : "";
-          record(xhr.responseURL || xhr.__gefeiCapUrl, xhr.status, ct, body);
+          record(xhr.responseURL || xhr.__gefeiCapUrl, xhr.status, ct, body, { via: "xhr", method: xhr.__gefeiCapMethod, headers: headerObj(xhr.__gefeiCapHeaders) });
         } catch (e) {}
       });
     }

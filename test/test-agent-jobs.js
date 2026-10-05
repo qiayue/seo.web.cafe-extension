@@ -45,5 +45,24 @@ check("capture：翻页要有按钮选择器，次数有上限", () => {
 check("在网页里执行的两个函数能单独序列化（不引用外面的变量）", () => {
   for (const f of [G.fetchInPage, G.clickNext]) assert.ok(!/\bG\.|\bSITES\b|\bMAX_/.test(f.toString()), f.name);
 });
+check("Similarweb 着陆页：在插件里就整理成行（去重、带子站、周趋势按日期排好），交回去的只有这些", () => {
+  const page = (n, urls) => ({ url: "https://sim.3ue.com/api/websiteOrganicLandingPagesV2?from=2026%7C09%7C04&to=2026%7C10%7C01&isWindow=true&latest=28d&key=github.io", page: n,
+    body: JSON.stringify({ TotalCount: 350121, Data: urls.map((u, i) => ({ Url: u, Trend: { "2026-09-25": 2, "2026-09-18": 1 }, Clicks: 100 - i, PrevClicks: 50, ClicksChange: 1, ClicksShare: 0.01,
+      KeywordsCount: 7, TopKeyword: "annas archive", ChangeState: "Positive" })) }) });
+  const x = G.runExtract("sw_landing", [page(0, ["A.github.io/x", "b.github.io/"]), page(1, ["b.github.io/", "c.github.io/y"]), { url: "x", body: "not json" }]);
+  assert.equal(x.total, 350121);
+  assert.deepEqual(x.rows.map((r) => r.url), ["A.github.io/x", "b.github.io/", "c.github.io/y"]);
+  assert.equal(x.rows[0].host, "a.github.io");
+  assert.deepEqual(x.rows[0].trend, [["2026-09-18", 1], ["2026-09-25", 2]]);
+  assert.equal(x.rows[2].page, 1);
+  assert.equal(x.rows[0].topKeyword, "annas archive");
+  assert.deepEqual(x.period, { from: "2026|09|04", to: "2026|10|01", latest: "28d", isWindow: true, key: "github.io" });
+  assert.ok(!("body" in x.rows[0]) && !("Trend" in x.rows[0]));
+});
+check("带解析器的任务：没写 match 就用解析器自己的；不认识的解析器不接；翻页可以只给翻页条上的一段文字", () => {
+  const j = G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", extract: "sw_landing", pager: { near: "out of", times: 4 } }, {});
+  assert.ok(/LandingPages/.test(j.match) && j.pager.near === "out of" && j.pager.selector === "");
+  bad({ requestId: ID, kind: "capture", site: "similarweb", path: "/", extract: "evil" });
+});
 console.log(failed ? "\n" + failed + " 项未通过" : "\n全部通过 ✓");
 process.exit(failed ? 1 : 0);

@@ -24,7 +24,7 @@ check("带账号密码的、不是 http(s) 的、太长的不开", () => {
 check("读页面的函数能单独序列化进网页执行（不引用外面的变量）", () => {
   const src = R.extractPage.toString();
   assert.ok(!/\bR\.|\bMAX_TEXT\b|\bMAX_HTML\b/.test(src));
-  assert.equal(R.extractPage.length, 2);
+  assert.equal(R.extractPage.length, 3);
 });
 console.log(failed ? "\n" + failed + " 项未通过" : "\n全部通过 ✓");
 process.exit(failed ? 1 : 0);
