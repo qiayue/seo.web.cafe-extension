@@ -506,6 +506,70 @@
     $("ahrefsOut").appendChild(box);
   }
 
+  // ---------- 远程任务：new.web.cafe 派来的任务（0.11.0 起，见 background.js ⑥） ----------
+  // 连接：到 new.web.cafe 后台「插件任务」点「连接插件」，令牌经那个页面里的内容脚本交过来（后台先确认是管理员的令牌才存）。
+  // ⚠️ 只给管理员：没连上（普通用户）整块不显示，也就看不到 Similarweb 地址这些设置
+  // 状态（最近一次去领任务的时间、正在做哪张、上一张做成没有）后台写在 storage.local.agentStatus
+  var G = self.GefeiAgentJobs;
+  function ago(t) {
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    return s < 60 ? s + " 秒前" : s < 3600 ? Math.round(s / 60) + " 分钟前" : Math.round(s / 3600) + " 小时前";
+  }
+  function renderAgent() {
+    chrome.storage.local.get(["agentToken", "agentOn", "agentStatus", "agentAccount"]).then(function (r) {
+      var st = r.agentStatus || {}, on = r.agentOn !== false;
+      $("agentBox").hidden = !r.agentToken;
+      $("agentOn").checked = on;
+      var lines = [];
+      if (r.agentToken) {
+        var who = r.agentAccount ? "（管理员 " + r.agentAccount + "）" : "";
+        lines.push(on ? "已连接 new.web.cafe" + who + (st.at ? "，" + ago(st.at) + "去领过任务" : "，等第一次去领任务") + "。" : "已连接" + who + "，但现在不接任务（勾上上面那个框才接）。");
+        if (st.error) lines.push("⚠ " + st.error);
+        if (st.current && st.current.at && Date.now() - st.current.at < 6 * 60000 && !(st.lastDone && st.lastDone.id === st.current.id)) lines.push("正在做：" + st.current.kind + " " + String(st.current.url || "").replace(/^https:\/\//, "").slice(0, 60));
+        if (st.lastDone) lines.push("上一张（" + ago(st.lastDone.at) + "）：" + (st.lastDone.ok ? "交回了" : "没取到——" + (st.lastDone.error || "原因不明")));
+      }
+      $("agentState").textContent = lines.join(" ");
+    });
+  }
+  renderAgent();
+  setInterval(renderAgent, 5000);
+  chrome.storage.onChanged.addListener(function (changes, area) { if (area === "local" && (changes.agentStatus || changes.agentToken || changes.agentOn || changes.agentAccount)) renderAgent(); });
+  $("agentOn").addEventListener("change", function () { chrome.storage.local.set({ agentOn: $("agentOn").checked }); });
+  $("agentPollNow").addEventListener("click", function () { chrome.runtime.sendMessage({ type: "agent:poll" }).catch(function () {}); setTimeout(renderAgent, 1500); });
+  $("agentForget").addEventListener("click", function () {
+    // 只清插件这边；new.web.cafe 后台那边也点一下「断开」，令牌才彻底作废
+    chrome.storage.local.remove(["agentToken", "agentStatus", "agentAccount"]);
+  });
+
+  // Similarweb 地址：远程任务里只写「Similarweb + 路径」，域名用这里填的（默认官方；用共享账号就填镜像站）
+  var SW = G.SITES.similarweb;
+  var swBase = SW.defaultBase;
+  function swPermState() {
+    var host = swBase.replace(/^https:\/\//, "");
+    $("similarwebBase").value = swBase === SW.defaultBase ? "" : swBase;
+    chrome.permissions.contains({ origins: [swBase + "/*"] }).then(function (ok) {
+      $("similarwebAllow").hidden = ok;
+      $("similarwebAllow").textContent = "允许读 " + host + " 的数据";
+      $("similarwebPerm").textContent = ok
+        ? "已允许读 " + host + "：new.web.cafe 派来 Similarweb 任务时，插件用你在这个浏览器里登录的账号打开、把数据交回去。"
+        : "还没允许读 " + host + "（Chrome 会问一次）。不允许的话，Similarweb 的远程任务会停下来等你点「允许」。";
+    }, function () {});
+  }
+  chrome.storage.local.get(SW.storeKey).then(function (r) { swBase = G.normBase(r[SW.storeKey], SW.defaultBase) || SW.defaultBase; swPermState(); }, swPermState);
+  $("similarwebAllow").addEventListener("click", function () {
+    chrome.permissions.request({ origins: [swBase + "/*"] }).then(swPermState, swPermState);
+  });
+  $("saveSimilarweb").addEventListener("click", function () {
+    var b = G.normBase($("similarwebBase").value, SW.defaultBase);
+    if (!b) { $("similarwebSaved").textContent = "这不像网址，填 https:// 开头的域名，比如 https://sim.3ue.com"; return; }
+    swBase = b;
+    var o = {}; o[SW.storeKey] = b === SW.defaultBase ? "" : b;
+    chrome.storage.local.set(o).then(function () {
+      swPermState();
+      $("similarwebSaved").textContent = "已保存：" + b.replace(/^https?:\/\//, "");
+    });
+  });
+
   // 版本：本地加载的插件不会自动更新，谷歌趋势的内部接口一变就会取不到数，落后了就提示去下载新版
   var mine = chrome.runtime.getManifest().version;
   $("ver").textContent = "版本 " + mine;

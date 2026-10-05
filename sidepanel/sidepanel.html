@@ -64,6 +64,22 @@
     <button type="button" id="askWord">问 Agent：这个词是不是新词、值不值得做？</button>
   </section>
 
+  <!-- 远程任务只给管理员：new.web.cafe 管理员在后台连上之后才显示，普通用户看不到这一块 -->
+  <section id="agentBox" hidden>
+    <h2>远程任务（new.web.cafe）</h2>
+    <p class="hint" id="agentState"></p>
+    <label class="check"><input type="checkbox" id="agentOn" checked> 接远程任务（每分钟去 new.web.cafe 领一张，用这个浏览器里登录着的账号取数）</label>
+    <div class="btns">
+      <button type="button" id="agentPollNow">现在去领一次</button>
+      <button type="button" id="agentForget">断开</button>
+    </div>
+    <label for="similarwebBase">Similarweb 地址（用共享账号就填它的域名，比如 https://sim.3ue.com；不填 = 官方）</label>
+    <input id="similarwebBase" type="text" placeholder="https://pro.similarweb.com" spellcheck="false" autocomplete="off">
+    <button type="button" class="small" id="saveSimilarweb">保存</button> <span id="similarwebSaved" class="hint"></span>
+    <p class="hint" id="similarwebPerm"></p>
+    <button type="button" class="small" id="similarwebAllow" hidden>允许读 Similarweb 数据</button>
+  </section>
+
   <details class="settings" id="settings">
     <summary>设置</summary>
     <label for="ahrefsBase">Ahrefs 地址（用镜像站就填它的域名，比如 https://ahrefs.3ue.com）</label>
@@ -80,6 +96,7 @@
   </footer>
   <script src="../lib/trends-parse.js"></script>
   <script src="../lib/ahrefs-parse.js"></script>
+  <script src="../lib/agent-jobs.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>
