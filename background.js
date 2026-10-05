@@ -541,12 +541,14 @@ function onCaptureItem(tabId, msg) {
           if (parsed && job.bytes + size > G.MAX_TOTAL) { stop = "数据量到上限（已整理 " + job.items.length + " 页），停止翻页"; job.pagerEnd = stop; }
           else if (parsed) {
             first = !job.items.length;
+            job.noData = 0;
             job.items.push({ url: url, status: Number(msg.status) || 0, page: job.pagesDone, parsed: parsed });
             job.bytes += size;
           }
         }
       } else if (want && job.items.length < job.maxItems && body.length <= G.MAX_ITEM_BODY && job.bytes + body.length <= G.MAX_TOTAL) {
         first = !job.items.length;
+        job.noData = 0;
         job.items.push({ url: url, status: Number(msg.status) || 0, page: job.pagesDone, body: body });
         job.bytes += body.length;
       }
@@ -573,11 +575,24 @@ function captureCheck(tabId) {
     if (now < (job.loadedAt || job.startedAt) + job.minMs) { scheduleCaptureCheck(tabId, (job.loadedAt || job.startedAt) + job.minMs - now); return; }
     // 一段要的数据都还没来（页面还在加载，或接口都还没打）：接着等，到点由超时收尾（那时把请求过的接口清单交回去，摸接口用）
     if (!job.items.length) { scheduleCaptureCheck(tabId, job.quietMs); return; }
-    // 点了「下一页」却没有新数据进来：翻到底了（或者到了账号能看的上限，比如官方账号只给前 100 条），别一直点下去
+    // 点了「下一页」却没有新数据进来：先多等一会儿（接口慢）；还没有就再点一次（那一下可能没点上）；
+    // 两次都不行才算翻到底了（或者到了账号能看的上限，比如官方账号只给前 100 条），别一直点下去。
+    // 实测只等一次的话，pages.dev 4 月翻到第 2 页就停了（199 行）、vercel.app 4 月重抓两次都停在 897 行
     if (job.pager && job.pagesDone > 0 && !job.pagerEnd && !job.items.some(function (it) { return it.page === job.pagesDone; })) {
+      var tries = (job.noData || 0) + 1;
       return serial(function () {
-        return loadJobs().then(function (jobs2) { var j = jobs2[tabId]; if (j) { j.pagerEnd = "点了下一页没有新数据（到底了，或账号只能看到这么多）"; return saveJobs(jobs2); } });
-      }).then(function () { return finishCapture(tabId, false); });
+        return loadJobs().then(function (jobs2) {
+          var j = jobs2[tabId];
+          if (!j) return;
+          j.noData = tries;
+          if (tries > 2) j.pagerEnd = "点了下一页没有新数据（到底了，或账号只能看到这么多）";
+          return saveJobs(jobs2);
+        });
+      }).then(function () {
+        if (tries === 1) { notify(job, "wait", "第 " + (job.pagesDone + 1) + " 页还没出来，再等等…"); return scheduleCaptureCheck(tabId, Math.round(job.pager.waitMs * 1.5)); }
+        if (tries === 2) { notify(job, "retry", "第 " + (job.pagesDone + 1) + " 页还是没出来，再点一次下一页…"); return turnPage(tabId); }
+        return finishCapture(tabId, false);
+      });
     }
     if (job.pager && !job.pagerEnd && job.pagesDone < job.pager.times && (job.extract || job.items.length < job.maxItems)) return turnPage(tabId);
     return finishCapture(tabId, false);
