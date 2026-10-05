@@ -495,7 +495,7 @@ function startRemoteJob(msg, from) {
             noForeground: !capture, // fetch 不用页面画出来，后台标签页就够；capture 要页面自己去请求，后台叫不醒时切到前台
             timeoutMs: msg.timeoutMs,
             fields: capture
-              ? { kind: "capture", origin: origin, match: msg.match || "", extract: msg.extract || "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
+              ? { kind: "capture", origin: origin, match: msg.match || "", extract: msg.extract || "", pace: msg.pace === "fast" ? "fast" : "normal", throttled: "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
                 items: [], seen: [], bytes: 0, lastAt: null, pagesDone: 0, pagerEnd: "", loginSeen: false }
               : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, transport: msg.transport === "xhr" ? "xhr" : "fetch", fetching: false },
             label: { keyword: host, range: capture ? "截数据" + (msg.pager ? "（翻页）" : "") : "请求接口 ×" + msg.requests.length, geo: "" },
@@ -520,6 +520,13 @@ function onCaptureItem(tabId, msg) {
       var body = typeof msg.body === "string" ? msg.body : "";
       var want = !!body && (!job.match || new RegExp(job.match).test(url));
       var first = false, stop = "";
+      // 要的那个接口回了 403 / 429：多半是被限流、被拦了。马上停下这张（不硬撞），交回失败，之后歇 30 分钟再领（agentDone）
+      var st = Number(msg.status) || 0;
+      if ((st === 403 || st === 429) && (!job.match || new RegExp(job.match).test(url)) && !job.throttled) {
+        job.throttled = "接口回了 " + st + "（疑似被限流 / 拦截），已停下，歇 30 分钟再接着干";
+        stop = job.throttled;
+        job.pagerEnd = stop;
+      }
       var ex = job.extract && G.EXTRACTORS[job.extract];
       if (want && ex && ex.page) {
         // 带解析器：先看这一页完不完整（要升级才看得到的列 → 停止翻页、这一页丢掉），完整的当场整理成行，原始数据不留
@@ -548,7 +555,7 @@ function onCaptureItem(tabId, msg) {
     });
   }).then(function (r) {
     if (!r) return;
-    if (r.stop) { notify(r.job, "stop", r.stop); return finishCapture(tabId, false); }
+    if (r.stop) { notify(r.job, "stop", r.stop); return r.job.throttled ? finish(tabId, { ok: false, error: r.job.throttled }, false, true) : finishCapture(tabId, false); }
     if (r.first) notify(r.job, "data", "截到数据了，等页面加载完…");
     scheduleCaptureCheck(tabId, r.job.quietMs);
   });
@@ -588,18 +595,19 @@ function turnPage(tabId) {
   }).then(function (job) {
     if (!job) return;
     // 像人一样：先把这一页往下滚着看一会儿；每看几页歇一会儿（歇的页数、时长都随机），再点下一页
-    var restNow = job.pagesDone > 0 && job.pagesDone >= (job.nextRestAt || G.rand(G.HUMAN.restEvery[0], G.HUMAN.restEvery[1]));
-    var rest = restNow ? G.rand(G.HUMAN.restMs[0], G.HUMAN.restMs[1]) : 0;
+    var H = G.paceOf(job.pace);
+    var restNow = job.pagesDone > 0 && job.pagesDone >= (job.nextRestAt || G.rand(H.restEvery[0], H.restEvery[1]));
+    var rest = restNow ? G.rand(H.restMs[0], H.restMs[1]) : 0;
     if (restNow) notify(job, "rest", "看了 " + (job.pagesDone + 1) + " 页，歇 " + Math.round(rest / 1000) + " 秒…");
     var before = rest
       ? chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.browseLikeHuman, args: [rest, true] })
       : Promise.resolve();
     return before.then(function () {
-      return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.browseLikeHuman, args: [G.rand(G.HUMAN.readMs[0], G.HUMAN.readMs[1]), false] });
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.browseLikeHuman, args: [G.rand(H.readMs[0], H.readMs[1]), false] });
     }).catch(function () {}).then(function () {
       if (!restNow) return;
       return serial(function () {
-        return loadJobs().then(function (jobs) { var j = jobs[tabId]; if (j) { j.nextRestAt = j.pagesDone + G.rand(G.HUMAN.restEvery[0], G.HUMAN.restEvery[1]); return saveJobs(jobs); } });
+        return loadJobs().then(function (jobs) { var j = jobs[tabId]; if (j) { j.nextRestAt = j.pagesDone + G.rand(H.restEvery[0], H.restEvery[1]); return saveJobs(jobs); } });
       });
     }).then(function () {
       return loadJobs().then(function (jobs) { return jobs[tabId] ? true : null; }); // 看的时候任务被撤了 / 标签页被关了
@@ -707,6 +715,7 @@ ensureCaptureScripts();
 // 一次只做一张：正在做的记在 storage.session.agentRunning，做完马上领下一张；卡住超过 6 分钟的不再等
 var AGENT_ALARM = "gefei-agent-poll";
 var AGENT_STUCK_MS = 35 * 60000; // 一直往后翻的任务最长 30 分钟
+var THROTTLE_COOLDOWN_MS = 30 * 60000; // 疑似被限流：歇这么久再领下一张
 function agentConf() {
   return chrome.storage.local.get(["agentToken", "agentOn", "agentServer"]).then(function (r) {
     var server = G.AGENT_SERVERS.indexOf(r.agentServer) >= 0 ? r.agentServer : G.AGENT_SERVERS[0];
@@ -771,11 +780,15 @@ function agentDone(requestId, result) {
     agentStatus({ lastDone: { id: requestId, ok: false, error: "结果没交上去：" + String((e && e.message) || e).slice(0, 100), at: Date.now() } });
   }).then(function () {
     return chrome.storage.session.get("agentRunning").then(function (r) {
-      if (r.agentRunning && r.agentRunning.id === requestId) return chrome.storage.session.remove("agentRunning");
+      var pace = r.agentRunning && r.agentRunning.id === requestId ? r.agentRunning.pace : "";
+      return (r.agentRunning && r.agentRunning.id === requestId ? chrome.storage.session.remove("agentRunning") : Promise.resolve()).then(function () { return pace; });
     });
-  }).then(function () {
-    // 两张任务之间随机隔一会儿（不规律，像人）；到点由每分钟的闹钟领下一张
-    var gap = G.rand(G.HUMAN.betweenJobsMs[0], G.HUMAN.betweenJobsMs[1]);
+  }).then(function (pace) {
+    // 两张任务之间随机隔一会儿（不规律，像人）；疑似被限流就歇 30 分钟。到点由每分钟的闹钟领下一张
+    var H = G.paceOf(pace);
+    var throttled = !body.ok && /疑似被限流/.test(body.error);
+    var gap = throttled ? THROTTLE_COOLDOWN_MS : G.rand(H.betweenJobsMs[0], H.betweenJobsMs[1]);
+    if (throttled) agentStatus({ error: "Similarweb 疑似限流，插件歇 30 分钟再接着干", at: Date.now() });
     return chrome.storage.session.set({ agentNextAt: Date.now() + gap }).then(function () {
       setTimeout(function () { agentPoll(false); }, gap + 500); // 后台被浏览器收了也没关系，每分钟的闹钟会接着领
     });
@@ -798,7 +811,7 @@ function agentPoll(force) {
           var msg;
           try { msg = G.normAgentJob(job, bases); }
           catch (e) { return agentDone(job.requestId, { ok: false, error: "插件不接这张任务：" + e.message }); }
-          return chrome.storage.session.set({ agentRunning: { id: msg.requestId, at: Date.now() } }).then(function () {
+          return chrome.storage.session.set({ agentRunning: { id: msg.requestId, at: Date.now(), pace: msg.pace || "normal" } }).then(function () {
             agentStatus({ current: { id: msg.requestId, kind: msg.kind, url: msg.url, at: Date.now() } });
             return startJob(msg, { agent: true }).catch(function (e) { return agentDone(msg.requestId, { ok: false, error: String((e && e.message) || e) }); });
           });

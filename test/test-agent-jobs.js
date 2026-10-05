@@ -72,5 +72,12 @@ check("要升级才看得到的数据：两成以上的行被锁（网址打码 
   assert.equal(G.swPageCheck({ Data: [] }).complete, false);
   assert.deepEqual(G.swLandingRows({ Data: [ok, lockedUrl, noClicks, upsell] }).map((r) => r.url), ["a.vercel.app/"]);
 });
+check("节奏：任务写 pace: fast 就用快一点的（照样随机、照样歇），其它一律按正常节奏", () => {
+  assert.equal(G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pace: "fast" }, {}).pace, "fast");
+  assert.equal(G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pace: "turbo" }, {}).pace, "normal");
+  assert.equal(G.paceOf("fast"), G.FAST);
+  assert.equal(G.paceOf("x"), G.HUMAN);
+  assert.ok(G.FAST.readMs[0] >= 1000 && G.FAST.restMs[0] >= 5000, "快也不能快到不像人");
+});
 console.log(failed ? "\n" + failed + " 项未通过" : "\n全部通过 ✓");
 process.exit(failed ? 1 : 0);
