@@ -16,7 +16,8 @@
 //   ⑥ 远程任务（0.11.0 起）：云端（NewTrend）把取数任务派到 new.web.cafe，这里每分钟去领一张（agentPoll），在你的浏览器里
 //      用你登录着的账号做完、把结果交回 new.web.cafe。任务里只写「哪个网站 + 路径」（lib/agent-jobs.js），域名用你在侧边栏
 //      「设置」里填的地址（Similarweb 官方或共享账号的镜像站）。三类：page 读网页；capture 截下页面自己请求回来的数据
-//      （content/capture-hook.js，可以点「下一页」翻页）；fetch 在网页里带着登录态请求它自己的接口。一次只做一张，做完马上领下一张。
+//      （content/capture-hook.js，可以点「下一页」翻页，最多 20 页）；fetch 在网页里带着登录态请求它自己的接口。一次只做一张。
+//      像人一样干活：每页先往下滚着看一会儿再点下一页，看几页歇一会儿，两张任务之间随机隔一两分钟（时长都随机，见 lib/agent-jobs.js HUMAN）。
 //      要先在 new.web.cafe 后台「插件任务」点「连接插件」（content/agent-bridge.js 把令牌交过来）。
 //      ⚠️ 只给管理员（插件普通用户也在用）：配对时先拿令牌问 new.web.cafe「是不是管理员的」，是才存；之后哪一次回 403
 //      （配对的账号不再是管理员）就清掉令牌、不再领任务。没配对的插件不定闹钟、不去 new.web.cafe，侧边栏也不显示这一块。
@@ -586,9 +587,28 @@ function turnPage(tabId) {
     });
   }).then(function (job) {
     if (!job) return;
-    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.clickNext, args: [job.pager.selector || "", job.pager.near || ""] }).then(function (res) {
+    // 像人一样：先把这一页往下滚着看一会儿；每看几页歇一会儿（歇的页数、时长都随机），再点下一页
+    var restNow = job.pagesDone > 0 && job.pagesDone >= (job.nextRestAt || G.rand(G.HUMAN.restEvery[0], G.HUMAN.restEvery[1]));
+    var rest = restNow ? G.rand(G.HUMAN.restMs[0], G.HUMAN.restMs[1]) : 0;
+    if (restNow) notify(job, "rest", "看了 " + (job.pagesDone + 1) + " 页，歇 " + Math.round(rest / 1000) + " 秒…");
+    var before = rest
+      ? chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.browseLikeHuman, args: [rest, true] })
+      : Promise.resolve();
+    return before.then(function () {
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.browseLikeHuman, args: [G.rand(G.HUMAN.readMs[0], G.HUMAN.readMs[1]), false] });
+    }).catch(function () {}).then(function () {
+      if (!restNow) return;
+      return serial(function () {
+        return loadJobs().then(function (jobs) { var j = jobs[tabId]; if (j) { j.nextRestAt = j.pagesDone + G.rand(G.HUMAN.restEvery[0], G.HUMAN.restEvery[1]); return saveJobs(jobs); } });
+      });
+    }).then(function () {
+      return loadJobs().then(function (jobs) { return jobs[tabId] ? true : null; }); // 看的时候任务被撤了 / 标签页被关了
+    }).then(function (still) {
+      if (!still) return { ok: false, why: "任务已结束" };
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.clickNext, args: [job.pager.selector || "", job.pager.near || ""] }).then(function (res) {
       return (res && res[0] && res[0].result) || { ok: false, why: "没点成" };
-    }, function (e) { return { ok: false, why: String((e && e.message) || e).slice(0, 100) }; }).then(function (r) {
+    }, function (e) { return { ok: false, why: String((e && e.message) || e).slice(0, 100) }; });
+    }).then(function (r) {
       return serial(function () {
         return loadJobs().then(function (jobs) {
           var j = jobs[tabId];
@@ -602,7 +622,7 @@ function turnPage(tabId) {
       if (!st) return;
       if (!st.ok) return finishCapture(tabId, false);
       notify(st.job, "page", "翻到第 " + (st.job.pagesDone + 1) + " 页…");
-      scheduleCaptureCheck(tabId, Math.max(st.job.pager.waitMs, st.job.quietMs));
+      scheduleCaptureCheck(tabId, Math.round(Math.max(st.job.pager.waitMs, st.job.quietMs) * (0.8 + Math.random() * 0.6)));
     });
   });
 }
@@ -726,7 +746,14 @@ function agentApi(method, body) {
 }
 /** 报进度（失败无所谓） */
 function agentReport(requestId, body) {
-  agentApi("POST", Object.assign({ requestId: requestId }, body)).catch(function () {});
+  agentApi("POST", Object.assign({ requestId: requestId }, body)).then(function (j) {
+    // 在 new.web.cafe 被撤销了（或者已经结束）：这边也停下、关掉标签页，别接着翻
+    if (j && j.cancelled) {
+      loadJobs().then(function (jobs) {
+        Object.keys(jobs).forEach(function (k) { if (jobs[k].requestId === requestId) finish(Number(k), { ok: false, error: "任务在 new.web.cafe 被撤销了" }, false, true); });
+      });
+    }
+  }).catch(function () {});
 }
 /** 交结果：网络抖了重试两次；交完（不管成没成）放开「正在做」，马上领下一张 */
 function agentDone(requestId, result) {
@@ -746,16 +773,23 @@ function agentDone(requestId, result) {
     return chrome.storage.session.get("agentRunning").then(function (r) {
       if (r.agentRunning && r.agentRunning.id === requestId) return chrome.storage.session.remove("agentRunning");
     });
-  }).then(function () { setTimeout(agentPoll, 3000); });
+  }).then(function () {
+    // 两张任务之间随机隔一会儿（不规律，像人）；到点由每分钟的闹钟领下一张
+    var gap = G.rand(G.HUMAN.betweenJobsMs[0], G.HUMAN.betweenJobsMs[1]);
+    return chrome.storage.session.set({ agentNextAt: Date.now() + gap }).then(function () {
+      setTimeout(function () { agentPoll(false); }, gap + 500); // 后台被浏览器收了也没关系，每分钟的闹钟会接着领
+    });
+  });
 }
 var polling = false;
-function agentPoll() {
+function agentPoll(force) {
   if (polling) return Promise.resolve();
   polling = true;
   return agentConf().then(function (c) {
     if (!c.token || !c.on) return;
-    return chrome.storage.session.get("agentRunning").then(function (r) {
+    return chrome.storage.session.get(["agentRunning", "agentNextAt"]).then(function (r) {
       if (r.agentRunning && Date.now() - r.agentRunning.at < AGENT_STUCK_MS) return; // 手上还有一张没做完
+      if (!force && r.agentNextAt && Date.now() < r.agentNextAt) return; // 上一张刚做完，歇一会儿再领
       return agentApi("GET").then(function (j) {
         agentStatus({ at: Date.now(), error: j && j.ok === false ? String(j.error || "领任务失败") : "" });
         var job = j && j.ok && Array.isArray(j.jobs) ? j.jobs[0] : null;
@@ -775,7 +809,7 @@ function agentPoll() {
     });
   }).catch(function () {}).then(function () { polling = false; });
 }
-chrome.alarms.onAlarm.addListener(function (a) { if (a.name === AGENT_ALARM) agentPoll(); });
+chrome.alarms.onAlarm.addListener(function (a) { if (a.name === AGENT_ALARM) agentPoll(false); });
 agentSetup().then(function (on) { if (on) agentPoll(); });
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== "local") return;
@@ -853,7 +887,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       .then(function () { sendResponse({ ok: true }); }, function (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); });
     return true;
   }
-  if (msg.type === "agent:poll" && sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0) { agentPoll(); return false; }
+  if (msg.type === "agent:poll" && sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0) { agentPoll(true); return false; }
+  if (msg.type === "agent:keepalive") return false; // 看页面时页面里每隔一会儿打个招呼，后台别被浏览器收了
   if (msg.type === "ahrefs:captured" && sender.tab) { onAhrefsCaptured(sender.tab.id, msg); return false; }
   if ((msg.type === "ahrefs:allowed" || msg.type === "ahrefs:denied") && sender.tab && sender.id === chrome.runtime.id && String(sender.url || "").indexOf(ALLOW_URL) === 0) {
     // 「允许」页面的两个按钮：允许了（权限已经加上）→ 接着读；不允许 → 这次不读
