@@ -835,7 +835,11 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   }
   if (msg.type === "capture:hello" && sender.tab) {
     // 截数据的脚本问「我是不是你为远程任务开的标签页」：不是就什么都别抄
-    loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; sendResponse({ job: !!(j && j.kind === "capture") }); }, function () { sendResponse({ job: false }); });
+    // 顺带认一下发消息的页面是不是我们为这个标签页注册的采集站点，不是就不答
+    siteBases().then(function (bases) {
+      if (bases.indexOf(sender.origin) < 0) { sendResponse({ job: false }); return; }
+      return loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; sendResponse({ job: !!(j && j.kind === "capture") }); }, function () { sendResponse({ job: false }); });
+    }, function () { sendResponse({ job: false }); });
     return true;
   }
   if (msg.type === "agent:pair") {
@@ -863,10 +867,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   }
   if (msg.type === "ahrefs:hello" && sender.tab) {
     // Ahrefs 页面里的脚本问「我是不是你开的取数标签页」：不是就什么都别发
-    loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; sendResponse({ job: !!(j && j.kind === "ahrefs") }); }, function () { sendResponse({ job: false }); });
+    ahrefsBase().then(function (base) {
+      if (sender.origin !== base) { sendResponse({ job: false }); return; }
+      return loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; sendResponse({ job: !!(j && j.kind === "ahrefs") }); }, function () { sendResponse({ job: false }); });
+    }, function () { sendResponse({ job: false }); });
     return true;
   }
-  if (msg.type === "trends:cancel" && /^[a-f0-9]{32}$/.test(String(msg.requestId || ""))) {
+  if (msg.type === "trends:cancel" && /^[a-f0-9]{32}$/.test(String(msg.requestId || "")) && ((sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0) || (!!sender.tab && sender.origin === SITE_ORIGIN))) {
     // 对话页点了停止（或侧边栏取消）：结束这张单、关掉它开的标签页。只认同样两处发来的
     var okSender = (sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0) || (!!sender.tab && sender.origin === SITE_ORIGIN);
     if (okSender) loadJobs().then(function (jobs) {
