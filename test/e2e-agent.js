@@ -62,7 +62,8 @@ const lpPage = `<!doctype html><title>着陆页</title><main><table id=t></table
   <div class="pg"><div class="a"><svg width=10 height=10><path d="M0 0"/></svg></div><div class="a"><svg width=10 height=10></svg></div>
   <input id=n value=1><span>out of 3</span><div class="a nx"><svg width=10 height=10></svg></div><div class="a"><svg width=10 height=10></svg></div></div></main><script>
   var page = 1;
-  function load() { var x = new XMLHttpRequest(); x.open("GET", "/api/websiteOrganicLandingPagesV2?key=github.io&from=2026%7C09%7C04&to=2026%7C10%7C01&isWindow=true&latest=28d&page=" + page);
+  var KEY = location.pathname === "/lp429" ? "throttle" : "github.io";
+  function load() { var x = new XMLHttpRequest(); x.open("GET", "/api/websiteOrganicLandingPagesV2?key=" + KEY + "&from=2026%7C09%7C04&to=2026%7C10%7C01&isWindow=true&latest=28d&page=" + page);
     x.onload = function () { document.getElementById("n").value = page; }; x.send(); }
   document.querySelector(".nx").addEventListener("click", function () { if (page < 3) { page++; load(); } });
   setTimeout(load, 300);
@@ -96,12 +97,14 @@ function handle(req, res) {
     }
     if (u.pathname === "/api/websiteOrganicLandingPagesV2") {
       const p = Number(u.searchParams.get("page")) || 1;
+      // 限流：key=throttle 的第 2 页回 429
+      if (u.searchParams.get("key") === "throttle" && p >= 2) return send(429, "application/json", JSON.stringify({ error: "Too Many Requests" }));
       // 第 3 页起要升级才看得到：网址打码、点击数没有（插件应停止翻页、这一页丢掉）
       if (p >= 3) return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map(() => ({ Url: "*****.github.io", Clicks: null, TopKeyword: "" })) }));
       return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map((i) => ({ Url: "s" + p + i + ".github.io/x", Clicks: 100 * p + i,
         PrevClicks: 0, ClicksChange: 1, ClicksShare: 0.001, KeywordsCount: 3, TopKeyword: "kw" + p + i, ChangeState: "New", Trend: { "2026-09-25": 5 } })) }));
     }
-    if (u.pathname === "/lp") return send(200, "text/html; charset=utf-8", lpPage);
+    if (u.pathname === "/lp" || u.pathname === "/lp429") return send(200, "text/html; charset=utf-8", lpPage);
     if (u.pathname === "/api/other") return send(200, "application/json", JSON.stringify({ other: true }));
     if (u.pathname === "/") {
       res.writeHead(200, { "content-type": "text/html", "set-cookie": "sw_session=" + host + "; Path=/; Secure; SameSite=Lax" });
@@ -231,6 +234,14 @@ async function waitReport(rid, ms = 40000) {
     let gone = false;
     for (let t = 0; t < 40 && !gone; t++) { await sleep(500); gone = !(await sw.evaluate(() => chrome.storage.session.get("jobs").then((r) => Object.keys(r.jobs || {}).length))); }
     check("任务在 new.web.cafe 被撤销：插件停下、关掉标签页，不接着翻", gone && swTabs().length === 0, swTabs().map((p) => p.url()).join());
+
+    // ③e 快节奏 + 接口回 429：停下这张、交回失败，歇 30 分钟再领
+    queue.push({ requestId: id("8"), kind: "capture", site: "similarweb", path: "/lp429", extract: "sw_landing", pace: "fast", quietMs: 1500, minMs: 0, pager: { near: "out of", times: 10, waitMs: 1200 } });
+    await sw.evaluate(() => { const F = self.GefeiAgentJobs.FAST; F.readMs = [200, 400]; F.restEvery = [5, 6]; F.restMs = [500, 800]; F.betweenJobsMs = [100, 200]; });
+    await sw.evaluate(() => agentPoll(true));
+    const r8 = await waitReport(id("8"), 60000);
+    const next8 = await sw.evaluate(() => chrome.storage.session.get("agentNextAt").then((r) => r.agentNextAt || 0));
+    check("接口回 429（疑似被限流）：停下这张、交回原因，歇 30 分钟再领", r8 && r8.ok === false && /疑似被限流/.test(r8.error) && next8 - Date.now() > 25 * 60000 && swTabs().length === 0, r8 && r8.error);
 
     // ④ 不认识的网站
     queue.push({ requestId: id("3"), kind: "page", site: "gmail", path: "/" });
