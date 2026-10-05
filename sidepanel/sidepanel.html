@@ -64,6 +64,22 @@
     <button type="button" id="askWord">问 Agent：这个词是不是新词、值不值得做？</button>
   </section>
 
+  <section id="agentBox">
+    <h2>远程任务（new.web.cafe）</h2>
+    <p class="hint" id="agentState">还没连接。</p>
+    <label class="check"><input type="checkbox" id="agentOn" checked> 接远程任务（每分钟去 new.web.cafe 领一张，用这个浏览器里登录着的账号取数）</label>
+    <div class="btns">
+      <button type="button" id="agentConnect">到 new.web.cafe 连接插件 ↗</button>
+      <button type="button" id="agentPollNow">现在去领一次</button>
+    </div>
+    <details>
+      <summary class="hint">手动粘贴令牌</summary>
+      <input id="agentToken" type="text" placeholder="wcx_…（new.web.cafe 后台「插件任务」里给的）" spellcheck="false" autocomplete="off">
+      <button type="button" class="small" id="agentSave">保存</button> <button type="button" class="small" id="agentForget">断开</button>
+      <span id="agentSaved" class="hint"></span>
+    </details>
+  </section>
+
   <details class="settings" id="settings">
     <summary>设置</summary>
     <label for="ahrefsBase">Ahrefs 地址（用镜像站就填它的域名，比如 https://ahrefs.3ue.com）</label>
@@ -71,6 +87,11 @@
     <button type="button" class="small" id="saveAhrefs">保存</button> <span id="ahrefsSaved" class="hint"></span>
     <p class="hint" id="ahrefsPerm"></p>
     <button type="button" class="small" id="ahrefsAllow" hidden>允许读 Ahrefs 数据</button>
+    <label for="similarwebBase">Similarweb 地址（远程任务用；用共享账号就填它的域名，比如 https://sim.3ue.com）</label>
+    <input id="similarwebBase" type="text" placeholder="https://pro.similarweb.com" spellcheck="false" autocomplete="off">
+    <button type="button" class="small" id="saveSimilarweb">保存</button> <span id="similarwebSaved" class="hint"></span>
+    <p class="hint" id="similarwebPerm"></p>
+    <button type="button" class="small" id="similarwebAllow" hidden>允许读 Similarweb 数据</button>
   </details>
 
   <footer>
@@ -80,6 +101,7 @@
   </footer>
   <script src="../lib/trends-parse.js"></script>
   <script src="../lib/ahrefs-parse.js"></script>
+  <script src="../lib/agent-jobs.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

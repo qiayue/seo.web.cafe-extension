@@ -13,6 +13,11 @@
 //      连同页面文字交回对话页。要你先在侧边栏「设置」里点一下「允许读 Ahrefs 数据」（Chrome 的站点权限），之后才注册这两个脚本。
 //   ⑤ 用浏览器打开网页读回来（0.9.0 起）：网站那边抓不到的网页（跳转太多、403、要登录、要执行 JS、人机验证），
 //      在后台开一个标签页，等页面渲染完读标题 / 正文 / 链接 / 表格 / 渲染后的 HTML，读完关掉。每个网站第一次要你点「允许」。
+//   ⑥ 远程任务（0.11.0 起）：云端（NewTrend）把取数任务派到 new.web.cafe，这里每分钟去领一张（agentPoll），在你的浏览器里
+//      用你登录着的账号做完、把结果交回 new.web.cafe。任务里只写「哪个网站 + 路径」（lib/agent-jobs.js），域名用你在侧边栏
+//      「设置」里填的地址（Similarweb 官方或共享账号的镜像站）。三类：page 读网页；capture 截下页面自己请求回来的数据
+//      （content/capture-hook.js，可以点「下一页」翻页）；fetch 在网页里带着登录态请求它自己的接口。一次只做一张，做完马上领下一张。
+//      要先在 new.web.cafe 后台「插件任务」点「连接插件」（content/agent-bridge.js 把令牌交过来），或者在侧边栏粘令牌。
 //
 // 看得见在干活：每个取数任务一接单就回「收到」（对话页转给服务器——服务器 20 秒没等到「收到」就不再干等），
 // 之后每一步（打开谷歌趋势 / 页面加载完 / 切到前台 / 曲线到了）都报一句进度；同时记进任务日志
@@ -21,10 +26,11 @@
 //
 // MV3 的 service worker 随时可能被浏览器回收：进行中的取数任务存在 chrome.storage.session 里，不放内存。
 // 超时用 setTimeout，worker 被回收就丢了——对话页那边自己也有 60 秒的超时兜底，不会干等。
-importScripts("lib/trends-parse.js", "lib/ahrefs-parse.js", "lib/page-read.js");
+importScripts("lib/trends-parse.js", "lib/ahrefs-parse.js", "lib/page-read.js", "lib/agent-jobs.js");
 var P = self.GefeiTrendsParse;
 var A = self.GefeiAhrefsParse;
 var R = self.GefeiPageRead;
+var G = self.GefeiAgentJobs;
 
 var SITE_ORIGIN = "https://seo.web.cafe";
 var JOB_TIMEOUT_MS = 45000;     // 页面那边 60 秒放弃，这里先放弃、把原因说清楚
@@ -80,7 +86,8 @@ serial(function () {
 /** 报一步进度：发给发起方（对话页标签页 / 侧边栏），并记进任务日志 */
 function notify(job, stage, text) {
   var m = { type: "trends:progress", requestId: job.requestId, stage: stage, text: text };
-  if (job.toPanel) chrome.runtime.sendMessage(m).catch(function () {});
+  if (job.toAgent) agentReport(job.requestId, { stage: "progress", note: text });
+  else if (job.toPanel) chrome.runtime.sendMessage(m).catch(function () {});
   else if (job.originTabId != null) chrome.tabs.sendMessage(job.originTabId, m).catch(function () {});
   logActivity(job.requestId, { stage: stage, text: text });
 }
@@ -89,6 +96,8 @@ function notify(job, stage, text) {
 function startJob(msg, from) {
   if (msg.kind === "ahrefs") return startAhrefsJob(msg, from);
   if (msg.kind === "page") return startPageJob(msg, from);
+  if (msg.kind === "capture" || msg.kind === "fetch") return startRemoteJob(msg, from);
+  if (from.agent) return Promise.reject(new Error("远程任务不取谷歌趋势"));
   return serial(function () {
     if (!/^[a-f0-9]{32}$/.test(String(msg.requestId || ""))) throw new Error("取数单号不对");
     var url = P.buildTrendsUrl({ keyword: msg.keyword, geo: msg.geo, date: msg.date });
@@ -142,12 +151,17 @@ function loadAllows() { return chrome.storage.session.get("allows").then(functio
 function saveAllows(a) { return chrome.storage.session.set({ allows: a }); }
 /** 给发起方（对话页标签页 / 侧边栏）发一条消息 */
 function tellFrom(from, m) {
+  if (from.agent) {
+    if (m.type === "trends:result") agentDone(m.requestId, { ok: !!m.ok, data: m.data || null, error: m.error || "" });
+    else agentReport(m.requestId, { stage: "progress", note: m.text || "" });
+    return;
+  }
   if (from.panel) chrome.runtime.sendMessage(m).catch(function () {});
   else if (from.tabId != null) chrome.tabs.sendMessage(from.tabId, m).catch(function () {});
 }
 function waitForAllow(msg, from, base, target, kind) {
   var host = base.replace(/^https:\/\//, "");
-  var who = { panel: !!from.panel, tabId: from.tab ? from.tab.id : null, windowId: from.tab ? from.tab.windowId : (Number.isInteger(msg.windowId) ? msg.windowId : null) };
+  var who = { panel: !!from.panel, agent: !!from.agent, tabId: from.tab ? from.tab.id : null, windowId: from.tab ? from.tab.windowId : (Number.isInteger(msg.windowId) ? msg.windowId : null) };
   return serial(function () {
     return loadAllows().then(function (allows) {
       // 同一张单已经在等（对话页刷新后又转来一次）：不再开第二个页面
@@ -164,7 +178,7 @@ function waitForAllow(msg, from, base, target, kind) {
     if (!tab) return;
     var text = "还没允许插件读 " + host + "：已在旁边打开「允许」页面，点了就接着读（等你 2 分钟）";
     tellFrom(who, { type: "trends:progress", requestId: msg.requestId, stage: "allow", text: text });
-    logActivity(msg.requestId, { keyword: kind === "page" ? host : target, range: kind === "page" ? "打开网页" : "Ahrefs · " + host, geo: "", from: who.panel ? "侧边栏" : "对话页", stage: "allow", text: "等你允许读 " + host + "…" });
+    logActivity(msg.requestId, { keyword: kind === "page" ? host : target, range: kind === "page" ? "打开网页" : "Ahrefs · " + host, geo: "", from: fromLabel(who), stage: "allow", text: "等你允许读 " + host + "…" });
     setTimeout(function () { endAllow(tab.id, false, "2 分钟内没点「允许」"); }, ALLOW_WAIT_MS);
   });
 }
@@ -183,8 +197,8 @@ function endAllow(allowTabId, granted, why) {
     var host = a.base.replace(/^https:\/\//, "");
     var originTab = a.from.tabId != null ? chrome.tabs.get(a.from.tabId).catch(function () { return null; }) : Promise.resolve(null);
     return originTab.then(function (tab) {
-      if (!a.from.panel && !tab) return; // 对话页已经关了：没人收
-      var from = a.from.panel ? { panel: true, tab: null } : { tab: tab };
+      if (!a.from.panel && !a.from.agent && !tab) return; // 对话页已经关了：没人收
+      var from = a.from.agent ? { agent: true } : a.from.panel ? { panel: true, tab: null } : { tab: tab };
       var fail = function (error) {
         tellFrom(a.from, { type: "trends:result", requestId: a.msg.requestId, ok: false, data: null, error: error });
         logActivity(a.msg.requestId, { endedAt: Date.now(), ok: false, error: error, stage: "failed", text: "" });
@@ -221,25 +235,28 @@ function openJob(msg, from, url, spec) {
         return loadJobs().then(function (jobs) {
           jobs[tab.id] = Object.assign({
             requestId: msg.requestId, url: url, returnTabId: returnTabId,
-            originTabId: from.panel ? null : from.tab.id, toPanel: !!from.panel,
+            originTabId: from.panel || from.agent ? null : from.tab.id, toPanel: !!from.panel, toAgent: !!from.agent,
             keepTab: !!(from.panel && msg.keepTab), // 调试用：取完不关，方便对照网页核对
             startedAt: Date.now(), loadedAt: null, foregroundAt: opts.active ? Date.now() : null,
           }, spec.fields);
           return saveJobs(jobs);
         }).then(function () {
-          logActivity(msg.requestId, Object.assign({ from: from.panel ? "侧边栏" : "对话页", stage: "opened", text: spec.opened }, spec.label));
-          setTimeout(function () { toForeground(tab.id); }, FOREGROUND_AFTER_MS);
+          logActivity(msg.requestId, Object.assign({ from: fromLabel(from), stage: "opened", text: spec.opened }, spec.label));
+          if (!spec.noForeground) setTimeout(function () { toForeground(tab.id); }, FOREGROUND_AFTER_MS);
           setTimeout(function () {
             if (spec.onTimeout) return spec.onTimeout(tab.id);
             finish(tab.id, { ok: false, error: (JOB_TIMEOUT_MS / 1000) + " 秒内没取到数据（谷歌趋势页面可能没加载完，或要求人机验证）——已把那个标签页切到前台，看一眼就知道" }, true);
-          }, JOB_TIMEOUT_MS);
+          }, spec.timeoutMs || JOB_TIMEOUT_MS);
         });
       });
     });
 }
 
+function fromLabel(from) { return from.agent ? "云端任务" : from.panel ? "侧边栏" : "对话页"; }
 function hasData(job) {
   if (job.kind === "ahrefs") return !!(job.series && job.series.length);
+  if (job.kind === "capture") return !!(job.items && job.items.length);
+  if (job.kind === "fetch") return true;
   if (job.kind === "page") return !!(job.page && job.page.textChars > 200);
   return !!job.points;
 }
@@ -271,14 +288,17 @@ function finish(tabId, result, reveal, cancelled) {
         var msg = { type: "trends:result", requestId: job.requestId, ok: !!result.ok, data: result.data || null, error: result.error || "",
           // 给侧边栏调试看的：打开的网址、总耗时和分段（页面加载完 / 曲线到 / 相关查询到 / 切到前台），相关查询到没到
           // （对话页那边用不上，传过去也不碍事）
-          debug: job.kind === "page" ? { url: job.url, ms: Date.now() - job.startedAt, loadMs: at(job.loadedAt), foregroundMs: at(job.foregroundAt), polls: job.polls || 0 }
+          debug: job.kind === "capture" || job.kind === "fetch" ? { url: job.url, ms: Date.now() - job.startedAt, loadMs: at(job.loadedAt), foregroundMs: at(job.foregroundAt) }
+            : job.kind === "page" ? { url: job.url, ms: Date.now() - job.startedAt, loadMs: at(job.loadedAt), foregroundMs: at(job.foregroundAt), polls: job.polls || 0 }
             : job.kind === "ahrefs" ? { url: job.url, ms: Date.now() - job.startedAt, loadMs: at(job.loadedAt), dataMs: at(job.firstDataAt), foregroundMs: at(job.foregroundAt) }
             : { url: job.url, ms: Date.now() - job.startedAt, related: job.rising !== null,
               loadMs: at(job.loadedAt), timelineMs: at(job.timelineAt), relatedMs: at(job.relatedAt), foregroundMs: at(job.foregroundAt) } };
-        if (job.toPanel) chrome.runtime.sendMessage(msg).catch(function () {}); // 侧边栏关了就没人收，无所谓
+        if (job.toAgent) agentDone(job.requestId, { ok: msg.ok, data: msg.data, error: msg.error });
+        else if (job.toPanel) chrome.runtime.sendMessage(msg).catch(function () {}); // 侧边栏关了就没人收，无所谓
         else chrome.tabs.sendMessage(job.originTabId, msg).catch(function () {});
         logActivity(job.requestId, { endedAt: Date.now(), ok: !!result.ok, error: result.error || "", stage: result.ok ? "done" : "failed",
-          text: !result.ok ? "" : job.kind === "page" ? "读到了（正文 " + ((result.data && result.data.textChars) || 0) + " 字）" : job.kind === "ahrefs" ? "读到了（" + ((result.data && result.data.series) || []).length + " 条曲线、" + Object.keys((result.data && result.data.metrics) || {}).length + " 个指标）"
+          text: !result.ok ? "" : job.kind === "capture" ? "截到了（" + ((result.data && result.data.items) || []).length + " 段数据" + (job.pagesDone ? "，翻了 " + job.pagesDone + " 页" : "") + "）"
+            : job.kind === "fetch" ? "请求完了（" + ((result.data && result.data.results) || []).length + " 个接口）" : job.kind === "page" ? "读到了（正文 " + ((result.data && result.data.textChars) || 0) + " 字）" : job.kind === "ahrefs" ? "读到了（" + ((result.data && result.data.series) || []).length + " 条曲线、" + Object.keys((result.data && result.data.metrics) || {}).length + " 个指标）"
             : "取到了（" + ((result.data && result.data.points) || []).length + " 个点）" });
         if (result.ok && job.keepTab) chrome.tabs.update(tabId, { active: true }).catch(function () {});
         else if (result.ok || cancelled) {
@@ -287,6 +307,7 @@ function finish(tabId, result, reveal, cancelled) {
           back.then(function () { chrome.tabs.remove(tabId).catch(function () {}); });
         }
         else if (reveal) chrome.tabs.update(tabId, { active: true }).catch(function () {});
+        else if (job.toAgent) chrome.tabs.remove(tabId).catch(function () {}); // 远程任务没人看着：没取到也关掉，别攒一堆标签页
       });
     });
   });
@@ -452,6 +473,276 @@ function onAhrefsCaptured(tabId, msg) {
   });
 }
 
+// ---------- 远程任务：capture（截下页面自己请求回来的数据，可以点「下一页」翻页）/ fetch（在网页里带登录态请求它自己的接口） ----------
+// 只给远程任务用（侧边栏、对话页不发这两类）。网站还没允许读：同「打开网页」，在旁边打开「允许」页面等你点
+function startRemoteJob(msg, from) {
+  if (!from.agent) return Promise.reject(new Error("这类任务只接 new.web.cafe 派来的"));
+  var origin = new URL(msg.url).origin, host = new URL(msg.url).host;
+  return chrome.permissions.contains({ origins: [origin + "/*"] }).then(function (ok) {
+    if (!ok) return waitForAllow(msg, from, origin, msg.url, "page");
+    var ready = msg.kind === "capture" ? ensureCaptureScripts() : Promise.resolve(true);
+    return ready.then(function () {
+      return serial(function () {
+        return loadJobs().then(function (jobs) {
+          var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
+          if (dup) return null;
+          var capture = msg.kind === "capture";
+          return openJob(msg, from, msg.url, {
+            noMark: true,
+            noForeground: !capture, // fetch 不用页面画出来，后台标签页就够；capture 要页面自己去请求，后台叫不醒时切到前台
+            timeoutMs: msg.timeoutMs,
+            fields: capture
+              ? { kind: "capture", origin: origin, match: msg.match || "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
+                items: [], seen: [], bytes: 0, lastAt: null, pagesDone: 0, pagerEnd: "", loginSeen: false }
+              : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, fetching: false },
+            label: { keyword: host, range: capture ? "截数据" + (msg.pager ? "（翻页）" : "") : "请求接口 ×" + msg.requests.length, geo: "" },
+            opened: "已在后台打开 " + host + "，等页面加载…",
+            onTimeout: function (tabId) { if (capture) finishCapture(tabId, true); else finish(tabId, { ok: false, error: Math.round((msg.timeoutMs || JOB_TIMEOUT_MS) / 1000) + " 秒内没请求完——已把那个标签页切到前台，看一眼就知道" }, true); },
+          });
+        });
+      });
+    });
+  });
+}
+
+/** 页面交上来一段数据：记进「请求过哪些接口」；是 JSON、对得上 match、没超量的收下 */
+function onCaptureItem(tabId, msg) {
+  return serial(function () {
+    return loadJobs().then(function (jobs) {
+      var job = jobs[tabId];
+      if (!job || job.kind !== "capture") return null;
+      var url = String(msg.url || "").slice(0, 2000);
+      if (job.seen.length < G.MAX_SEEN) job.seen.push({ url: url, status: Number(msg.status) || 0, ct: String(msg.ct || "").slice(0, 100), size: Number(msg.size) || 0, page: job.pagesDone });
+      var body = typeof msg.body === "string" ? msg.body : "";
+      var want = !!body && (!job.match || new RegExp(job.match).test(url));
+      var first = false;
+      if (want && job.items.length < job.maxItems && body.length <= G.MAX_ITEM_BODY && job.bytes + body.length <= G.MAX_TOTAL) {
+        first = !job.items.length;
+        job.items.push({ url: url, status: Number(msg.status) || 0, page: job.pagesDone, body: body });
+        job.bytes += body.length;
+      }
+      job.lastAt = Date.now();
+      return saveJobs(jobs).then(function () { return { job: job, first: first }; });
+    });
+  }).then(function (r) {
+    if (!r) return;
+    if (r.first) notify(r.job, "data", "截到数据了，等页面加载完…");
+    scheduleCaptureCheck(tabId, r.job.quietMs);
+  });
+}
+/** 过一会儿看一眼：安静了（这么久没有新数据）而且过了最短等待，就翻下一页或交卷 */
+function scheduleCaptureCheck(tabId, ms) {
+  setTimeout(function () { captureCheck(tabId); }, ms + 50);
+}
+function captureCheck(tabId) {
+  return loadJobs().then(function (jobs) {
+    var job = jobs[tabId];
+    if (!job || job.kind !== "capture" || job.paging) return;
+    var now = Date.now();
+    if (job.lastAt && now - job.lastAt < job.quietMs) return; // 还有数据在进来：等下一次（每段数据都会再约一次）
+    if (now < (job.loadedAt || job.startedAt) + job.minMs) { scheduleCaptureCheck(tabId, (job.loadedAt || job.startedAt) + job.minMs - now); return; }
+    // 一段要的数据都还没来（页面还在加载，或接口都还没打）：接着等，到点由超时收尾（那时把请求过的接口清单交回去，摸接口用）
+    if (!job.items.length) { scheduleCaptureCheck(tabId, job.quietMs); return; }
+    if (job.pager && !job.pagerEnd && job.pagesDone < job.pager.times && job.items.length < job.maxItems) return turnPage(tabId);
+    return finishCapture(tabId, false);
+  });
+}
+/** 点一下「下一页」：点不动（找不到 / 最后一页）就交卷；点了等新数据进来再看 */
+function turnPage(tabId) {
+  return serial(function () {
+    return loadJobs().then(function (jobs) {
+      var job = jobs[tabId];
+      if (!job || job.paging) return null;
+      job.paging = true;
+      return saveJobs(jobs).then(function () { return job; });
+    });
+  }).then(function (job) {
+    if (!job) return;
+    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.clickNext, args: [job.pager.selector] }).then(function (res) {
+      return (res && res[0] && res[0].result) || { ok: false, why: "没点成" };
+    }, function (e) { return { ok: false, why: String((e && e.message) || e).slice(0, 100) }; }).then(function (r) {
+      return serial(function () {
+        return loadJobs().then(function (jobs) {
+          var j = jobs[tabId];
+          if (!j) return null;
+          j.paging = false;
+          if (r.ok) { j.pagesDone += 1; j.lastAt = Date.now(); } else j.pagerEnd = r.why || "翻不动了";
+          return saveJobs(jobs).then(function () { return { job: j, ok: r.ok }; });
+        });
+      });
+    }).then(function (st) {
+      if (!st) return;
+      if (!st.ok) return finishCapture(tabId, false);
+      notify(st.job, "page", "翻到第 " + (st.job.pagesDone + 1) + " 页…");
+      scheduleCaptureCheck(tabId, Math.max(st.job.pager.waitMs, st.job.quietMs));
+    });
+  });
+}
+function finishCapture(tabId, timedOut) {
+  return loadJobs().then(function (jobs) {
+    var job = jobs[tabId];
+    if (!job) return;
+    if (job.loginSeen && !job.items.length) return finish(tabId, { ok: false, error: "要先登录（这个浏览器里没登录 " + new URL(job.url).host + "，或登录过期了）——已把那个标签页切到前台" }, true);
+    return chrome.tabs.get(tabId).then(function (t) { return t; }, function () { return null; }).then(function (t) {
+      if (!job.items.length && !job.seen.length) {
+        return finish(tabId, { ok: false, error: (timedOut ? "到点了，" : "") + "页面没请求任何数据（可能没加载出来、要登录，或网站改了版）——已把那个标签页切到前台" }, true);
+      }
+      return finish(tabId, { ok: true, data: { kind: "capture", url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
+        pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut, items: job.items, seen: job.seen } });
+    });
+  });
+}
+
+/** fetch：页面加载完，在页面里依次请求接口（带着浏览器自己的登录态），原样交回 */
+function runFetch(tabId) {
+  return serial(function () {
+    return loadJobs().then(function (jobs) {
+      var job = jobs[tabId];
+      if (!job || job.kind !== "fetch" || job.fetching) return null;
+      job.fetching = true;
+      return saveJobs(jobs).then(function () { return job; });
+    });
+  }).then(function (job) {
+    if (!job) return;
+    return chrome.tabs.get(tabId).then(function (t) {
+      // 跳到了别的网站（多半是登录页）：不在那边请求
+      if (!t || !t.url || new URL(t.url).origin !== job.origin) throw new Error("页面跳到了 " + (t && t.url ? new URL(t.url).host : "别处") + "（多半要登录）");
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, world: "MAIN", func: G.fetchInPage, args: [job.requests, job.delayMs, G.MAX_ITEM_BODY, G.MAX_TOTAL] });
+    }).then(function (res) {
+      var results = (res && res[0] && res[0].result) || [];
+      var okN = results.filter(function (r) { return r.status >= 200 && r.status < 300; }).length;
+      if (!okN) return finish(tabId, { ok: false, error: "接口全都没请求成功（" + results.map(function (r) { return r.status || r.error; }).slice(0, 5).join("、") + "）——多半要登录，已把那个标签页切到前台" }, true);
+      return finish(tabId, { ok: true, data: { kind: "fetch", url: job.url, results: results } });
+    }, function (e) {
+      return finish(tabId, { ok: false, error: "没请求成：" + String((e && e.message) || e).slice(0, 160) }, true);
+    });
+  });
+}
+
+// capture 的两个脚本：只注册在你设置了地址、并且点过「允许」的网站上
+var CAPTURE_IDS = ["gefei-capture-main", "gefei-capture-bridge"];
+function siteBases() {
+  var keys = Object.keys(G.SITES).map(function (k) { return G.SITES[k].storeKey; });
+  return chrome.storage.local.get(keys).then(function (r) { return G.basesFrom(r); }, function () { return G.basesFrom({}); });
+}
+function ensureCaptureScripts() {
+  return siteBases().then(function (bases) {
+    var all = Object.keys(bases).map(function (k) { return bases[k] + "/*"; });
+    return Promise.all(all.map(function (o) { return chrome.permissions.contains({ origins: [o] }).catch(function () { return false; }); })).then(function (oks) {
+      var origins = all.filter(function (o, i) { return oks[i]; });
+      return chrome.scripting.getRegisteredContentScripts({ ids: CAPTURE_IDS }).then(function (regs) {
+        var same = regs.length === CAPTURE_IDS.length && regs.every(function (r) { return (r.matches || []).join() === origins.join(); });
+        if (same) return true;
+        var drop = regs.length ? chrome.scripting.unregisterContentScripts({ ids: regs.map(function (r) { return r.id; }) }) : Promise.resolve();
+        return drop.then(function () {
+          if (!origins.length) return false;
+          return chrome.scripting.registerContentScripts([
+            { id: CAPTURE_IDS[0], matches: origins, js: ["content/capture-hook.js"], runAt: "document_start", world: "MAIN" },
+            { id: CAPTURE_IDS[1], matches: origins, js: ["content/capture-bridge.js"], runAt: "document_start" },
+          ]).then(function () { return true; });
+        });
+      });
+    });
+  }).catch(function () { return false; });
+}
+ensureCaptureScripts();
+
+// ---------- 远程任务：去 new.web.cafe 领任务、交结果 ----------
+// 配对令牌、开关存在 storage.local（agentToken / agentOn / agentServer）；每分钟一次闹钟（chrome.alarms，worker 被回收也照样叫醒）。
+// 一次只做一张：正在做的记在 storage.session.agentRunning，做完马上领下一张；卡住超过 6 分钟的不再等
+var AGENT_ALARM = "gefei-agent-poll";
+var AGENT_STUCK_MS = 6 * 60000;
+function agentConf() {
+  return chrome.storage.local.get(["agentToken", "agentOn", "agentServer"]).then(function (r) {
+    var server = G.AGENT_SERVERS.indexOf(r.agentServer) >= 0 ? r.agentServer : G.AGENT_SERVERS[0];
+    return { token: /^wcx_[a-f0-9]{48}$/.test(String(r.agentToken || "")) ? r.agentToken : "", on: r.agentOn !== false, server: server };
+  });
+}
+function agentSetup() {
+  return agentConf().then(function (c) {
+    if (c.token && c.on) { chrome.alarms.create(AGENT_ALARM, { periodInMinutes: 1 }); return true; }
+    chrome.alarms.clear(AGENT_ALARM).catch(function () {});
+    return false;
+  });
+}
+function agentStatus(patch) {
+  return chrome.storage.local.get("agentStatus").then(function (r) { return chrome.storage.local.set({ agentStatus: Object.assign({}, r.agentStatus || {}, patch) }); });
+}
+function agentApi(method, body) {
+  return agentConf().then(function (c) {
+    if (!c.token) throw new Error("还没连接 new.web.cafe");
+    return fetch(c.server + "/api/ext-agent/jobs", {
+      method: method, cache: "no-store",
+      headers: Object.assign({ Authorization: "Bearer " + c.token, "X-Ext-Version": chrome.runtime.getManifest().version }, body ? { "Content-Type": "application/json" } : {}),
+      body: body ? JSON.stringify(body) : undefined,
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (j) {
+        if (res.status === 401) { agentStatus({ error: "令牌失效了（在 new.web.cafe 被断开，或者重新配对过）：到 new.web.cafe 后台「插件任务」重新连接", at: Date.now() }); throw new Error("unpaired"); }
+        return j;
+      });
+    });
+  });
+}
+/** 报进度（失败无所谓） */
+function agentReport(requestId, body) {
+  agentApi("POST", Object.assign({ requestId: requestId }, body)).catch(function () {});
+}
+/** 交结果：网络抖了重试两次；交完（不管成没成）放开「正在做」，马上领下一张 */
+function agentDone(requestId, result) {
+  var body = { requestId: requestId, ok: !!result.ok, data: result.ok ? result.data : null, error: result.ok ? "" : String(result.error || "").slice(0, 500) };
+  var tries = 0;
+  function send() {
+    return agentApi("POST", body).catch(function (e) {
+      if (String(e && e.message) === "unpaired" || ++tries > 2) throw e;
+      return new Promise(function (r) { setTimeout(r, 3000 * tries); }).then(send);
+    });
+  }
+  return send().then(function (j) {
+    agentStatus({ lastDone: { id: requestId, ok: body.ok, error: body.error || (j && !j.ok ? j.error : ""), at: Date.now() } });
+  }, function (e) {
+    agentStatus({ lastDone: { id: requestId, ok: false, error: "结果没交上去：" + String((e && e.message) || e).slice(0, 100), at: Date.now() } });
+  }).then(function () {
+    return chrome.storage.session.get("agentRunning").then(function (r) {
+      if (r.agentRunning && r.agentRunning.id === requestId) return chrome.storage.session.remove("agentRunning");
+    });
+  }).then(function () { setTimeout(agentPoll, 3000); });
+}
+var polling = false;
+function agentPoll() {
+  if (polling) return Promise.resolve();
+  polling = true;
+  return agentConf().then(function (c) {
+    if (!c.token || !c.on) return;
+    return chrome.storage.session.get("agentRunning").then(function (r) {
+      if (r.agentRunning && Date.now() - r.agentRunning.at < AGENT_STUCK_MS) return; // 手上还有一张没做完
+      return agentApi("GET").then(function (j) {
+        agentStatus({ at: Date.now(), error: j && j.ok === false ? String(j.error || "领任务失败") : "" });
+        var job = j && j.ok && Array.isArray(j.jobs) ? j.jobs[0] : null;
+        if (!job) return;
+        return siteBases().then(function (bases) {
+          var msg;
+          try { msg = G.normAgentJob(job, bases); }
+          catch (e) { return agentDone(job.requestId, { ok: false, error: "插件不接这张任务：" + e.message }); }
+          return chrome.storage.session.set({ agentRunning: { id: msg.requestId, at: Date.now() } }).then(function () {
+            agentStatus({ current: { id: msg.requestId, kind: msg.kind, url: msg.url, at: Date.now() } });
+            return startJob(msg, { agent: true }).catch(function (e) { return agentDone(msg.requestId, { ok: false, error: String((e && e.message) || e) }); });
+          });
+        });
+      }, function (e) {
+        if (String(e && e.message) !== "unpaired") agentStatus({ at: Date.now(), error: "连不上 new.web.cafe：" + String((e && e.message) || e).slice(0, 100) });
+      });
+    });
+  }).catch(function () {}).then(function () { polling = false; });
+}
+chrome.alarms.onAlarm.addListener(function (a) { if (a.name === AGENT_ALARM) agentPoll(); });
+agentSetup().then(function (on) { if (on) agentPoll(); });
+chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area !== "local") return;
+  if (changes.agentToken || changes.agentOn) agentSetup().then(function (on) { if (on) agentPoll(); });
+  var siteKeys = Object.keys(G.SITES).map(function (k) { return G.SITES[k].storeKey; });
+  if (siteKeys.some(function (k) { return changes[k]; })) ensureCaptureScripts();
+});
+
 // ---------- Ahrefs 的两个脚本：你允许了读哪个 Ahrefs 地址，就只给那个地址注册 ----------
 function ahrefsBase() {
   return chrome.storage.local.get("ahrefsBase").then(function (r) { return A.normBase(r.ahrefsBase) || A.DEFAULT_BASE; }, function () { return A.DEFAULT_BASE; });
@@ -477,8 +768,8 @@ function ensureAhrefsScripts() {
   }).catch(function () { return false; });
 }
 ensureAhrefsScripts();
-if (chrome.permissions.onAdded) chrome.permissions.onAdded.addListener(function () { ensureAhrefsScripts().then(onAllowGranted); });
-if (chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(function () { ensureAhrefsScripts(); });
+if (chrome.permissions.onAdded) chrome.permissions.onAdded.addListener(function () { ensureCaptureScripts(); ensureAhrefsScripts().then(onAllowGranted); });
+if (chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(function () { ensureAhrefsScripts(); ensureCaptureScripts(); });
 chrome.storage.onChanged.addListener(function (changes, area) { if (area === "local" && changes.ahrefsBase) ensureAhrefsScripts(); });
 
 var PANEL_URL = chrome.runtime.getURL("sidepanel/");
@@ -496,6 +787,26 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return true; // 异步回话
   }
   if (msg.type === "trends:captured" && sender.tab) { onCaptured(sender.tab.id, msg); return false; }
+  if (msg.type === "capture:item" && sender.tab) { onCaptureItem(sender.tab.id, msg); return false; }
+  if (msg.type === "capture:login" && sender.tab) {
+    serial(function () { return loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; if (j && j.kind === "capture") { j.loginSeen = true; return saveJobs(jobs); } }); });
+    return false;
+  }
+  if (msg.type === "capture:hello" && sender.tab) {
+    // 截数据的脚本问「我是不是你为远程任务开的标签页」：不是就什么都别抄
+    loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; sendResponse({ job: !!(j && j.kind === "capture") }); }, function () { sendResponse({ job: false }); });
+    return true;
+  }
+  if (msg.type === "agent:pair") {
+    // new.web.cafe 后台「连接插件」发来的令牌（经 content/agent-bridge.js）：只认那个网站的页面
+    if (!sender.tab || G.AGENT_SERVERS.indexOf(sender.origin) < 0) { sendResponse({ ok: false, error: "只认 new.web.cafe 发来的配对" }); return false; }
+    var tok = String(msg.token || "");
+    if (!/^wcx_[a-f0-9]{48}$/.test(tok)) { sendResponse({ ok: false, error: "令牌格式不对" }); return false; }
+    chrome.storage.local.set({ agentToken: tok, agentOn: true, agentServer: sender.origin, agentStatus: { pairedAt: Date.now() } })
+      .then(function () { sendResponse({ ok: true }); }, function (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); });
+    return true;
+  }
+  if (msg.type === "agent:poll" && sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0) { agentPoll(); return false; }
   if (msg.type === "ahrefs:captured" && sender.tab) { onAhrefsCaptured(sender.tab.id, msg); return false; }
   if ((msg.type === "ahrefs:allowed" || msg.type === "ahrefs:denied") && sender.tab && sender.id === chrome.runtime.id && String(sender.url || "").indexOf(ALLOW_URL) === 0) {
     // 「允许」页面的两个按钮：允许了（权限已经加上）→ 接着读；不允许 → 这次不读
@@ -526,7 +837,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // 取数的标签页被关掉了 / 被跳到了别处（manifest 只给了 trends.google.com 的站点权限：
 // 谷歌的人机验证页 www.google.com/sorry 不在其中，tab.url 会是空的）
 chrome.tabs.onRemoved.addListener(function (tabId) {
-  loadJobs().then(function (jobs) { if (jobs[tabId]) finish(tabId, { ok: false, error: jobs[tabId].kind === "ahrefs" ? "读 Ahrefs 的标签页被关掉了" : "取数的谷歌趋势标签页被关掉了" }); });
+  loadJobs().then(function (jobs) {
+    var j = jobs[tabId];
+    if (j) finish(tabId, { ok: false, error: j.kind === "ahrefs" ? "读 Ahrefs 的标签页被关掉了" : j.kind === "trends" || !j.kind ? "取数的谷歌趋势标签页被关掉了" : "取数的标签页被关掉了" });
+  });
   endAllow(tabId, false, "「允许」页面被关掉了"); // 不是「允许」页面就什么都不做
 });
 chrome.tabs.onUpdated.addListener(function (tabId, info, tab) {
@@ -535,7 +849,7 @@ chrome.tabs.onUpdated.addListener(function (tabId, info, tab) {
     return loadJobs().then(function (jobs) {
       var job = jobs[tabId];
       if (!job) return false;
-      if (job.kind === "page") {
+      if (job.kind === "page" || job.kind === "capture" || job.kind === "fetch") {
         // 网页可能跳到别处（登录页、换了域名）：不算失败，读的时候看读不读得到
         if (!job.loadedAt) { job.loadedAt = Date.now(); return saveJobs(jobs).then(function () { return job; }); }
         return false;
@@ -547,6 +861,8 @@ chrome.tabs.onUpdated.addListener(function (tabId, info, tab) {
   }).then(function (redirected) {
     if (redirected && typeof redirected === "object") {
       if (redirected.kind === "page") { notify(redirected, "loaded", "页面加载完了，等它渲染…"); schedulePagePoll(tabId); return; }
+      if (redirected.kind === "capture") { notify(redirected, "loaded", "页面加载完了，等它请求数据…"); scheduleCaptureCheck(tabId, Math.max(redirected.quietMs, redirected.minMs)); return; }
+      if (redirected.kind === "fetch") { notify(redirected, "loaded", "页面加载完了，开始请求接口…"); runFetch(tabId); return; }
       notify(redirected, "loaded", "页面加载完了，等它出数据…"); return;
     }
     if (redirected) finish(tabId, { ok: false, error: redirected === "ahrefs" ? "Ahrefs 把页面跳到了别的网址（多半是没登录或登录过期）——已把那个标签页切到前台，登录后回对话页再问一次"

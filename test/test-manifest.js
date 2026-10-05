@@ -17,8 +17,8 @@ const exists = (p) => fs.existsSync(path.join(ROOT, p));
 
 check("MV3", () => assert.equal(m.manifest_version, 3));
 check("版本号是三段数字（侧边栏拿它和网站上的最新版比）", () => assert.match(m.version, /^\d+\.\d+\.\d+$/));
-check("权限只有这四个：侧边栏、存进行中的取数任务、点图标时读当前网页、插件更新后把传话脚本补进已打开的对话页", () => {
-  assert.deepEqual([...m.permissions].sort(), ["activeTab", "scripting", "sidePanel", "storage"]);
+check("权限只有这五个：侧边栏、存进行中的取数任务、点图标时读当前网页、插件更新后把传话脚本补进已打开的对话页、每分钟去 new.web.cafe 领远程任务的闹钟", () => {
+  assert.deepEqual([...m.permissions].sort(), ["activeTab", "alarms", "scripting", "sidePanel", "storage"]);
 });
 check("不申请 tabs / 全部网站 / 历史记录这类大权限", () => {
   assert.ok(!m.permissions.includes("tabs") && !m.permissions.includes("history"));
@@ -31,6 +31,10 @@ check("读 Ahrefs / 打开网页的站点权限都是可选的（运行时只申
   assert.deepEqual(m.optional_host_permissions, ["https://*/*", "http://*/*"]);
   assert.ok(!m.host_permissions.some((h) => /ahrefs/.test(h)));
 });
+check("远程任务截数据的脚本同样不写死（按侧边栏设置的 Similarweb 地址、允许之后才注册），文件都在", () => {
+  assert.ok(!m.content_scripts.some((c) => c.matches.some((x) => /similarweb|3ue/.test(x))));
+  ["content/capture-hook.js", "content/capture-bridge.js", "lib/agent-jobs.js"].forEach((f) => assert.ok(exists(f), f));
+});
 check("Ahrefs 的脚本不写死在 manifest 里（允许之后由后台按设置的地址注册），但文件都在", () => {
   assert.ok(!m.content_scripts.some((c) => c.matches.some((x) => /ahrefs/.test(x))));
   ["content/awake.js", "content/ahrefs-hook.js", "content/ahrefs-bridge.js", "lib/ahrefs-parse.js"].forEach((f) => assert.ok(exists(f), f));
@@ -39,14 +43,16 @@ check("谷歌趋势：让后台标签页照常加载的 awake.js 排在截数据
   const hook = m.content_scripts.find((c) => c.js.includes("content/trends-hook.js"));
   assert.deepEqual(hook.js, ["content/awake.js", "content/trends-hook.js"]);
 });
-check("站点权限只有两个站：谷歌趋势（看得到取数标签页的网址）、seo.web.cafe（插件更新后把传话脚本补进已打开的对话页）", () => {
+check("站点权限只有三个站：谷歌趋势（看得到取数标签页的网址）、seo.web.cafe（插件更新后把传话脚本补进已打开的对话页）、new.web.cafe（领远程任务、交结果）", () => {
   // 内容脚本的 matches 不算站点权限：只有它的话，后台读 tab.url 永远是空的，每个取数标签页都会被当成「被跳走了」；
   // 也没法往已经打开的对话页里补脚本。这两个站本来就在内容脚本里，安装时不会多出新的权限提示
-  assert.deepEqual([...m.host_permissions].sort(), ["https://seo.web.cafe/*", "https://trends.google.com/*"]);
+  assert.deepEqual([...m.host_permissions].sort(), ["https://new.web.cafe/*", "https://seo.web.cafe/*", "https://trends.google.com/*"]);
 });
-check("内容脚本只进两个站：seo.web.cafe 与 trends.google.com", () => {
+check("内容脚本只进三个站：seo.web.cafe、trends.google.com，以及 new.web.cafe（只有接配对令牌的那一个）", () => {
   const sites = new Set(m.content_scripts.flatMap((c) => c.matches));
-  assert.deepEqual([...sites].sort(), ["https://seo.web.cafe/*", "https://trends.google.com/*"]);
+  assert.deepEqual([...sites].sort(), ["https://new.web.cafe/*", "https://seo.web.cafe/*", "https://trends.google.com/*"]);
+  const nw = m.content_scripts.filter((c) => c.matches.includes("https://new.web.cafe/*"));
+  assert.deepEqual(nw.map((c) => c.js.join()), ["content/agent-bridge.js"]);
 });
 check("截数据的脚本跑在页面自己的环境里（MAIN），并且在页面发请求之前就位（document_start）", () => {
   const hook = m.content_scripts.find((c) => c.js.includes("content/trends-hook.js"));
@@ -66,7 +72,7 @@ check("引用到的文件都在", () => {
 check("后台用 importScripts 引的文件也在", () => {
   const bg = fs.readFileSync(path.join(ROOT, "background.js"), "utf8");
   const imported = [...bg.matchAll(/importScripts\(([^)]*)\)/g)].flatMap((x) => [...x[1].matchAll(/"([^"]+)"/g)].map((y) => y[1]));
-  assert.ok(imported.includes("lib/trends-parse.js") && imported.includes("lib/ahrefs-parse.js") && imported.includes("lib/page-read.js"), imported.join());
+  assert.ok(imported.includes("lib/trends-parse.js") && imported.includes("lib/ahrefs-parse.js") && imported.includes("lib/page-read.js") && imported.includes("lib/agent-jobs.js"), imported.join());
   assert.deepEqual(imported.filter((f) => !exists(f)), []);
 });
 check("根目录没有下划线开头的文件（Chrome 保留，会拒绝加载）", () => {
