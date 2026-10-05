@@ -299,7 +299,7 @@ function finish(tabId, result, reveal, cancelled) {
         else if (job.toPanel) chrome.runtime.sendMessage(msg).catch(function () {}); // 侧边栏关了就没人收，无所谓
         else chrome.tabs.sendMessage(job.originTabId, msg).catch(function () {});
         logActivity(job.requestId, { endedAt: Date.now(), ok: !!result.ok, error: result.error || "", stage: result.ok ? "done" : "failed",
-          text: !result.ok ? "" : job.kind === "capture" ? "截到了（" + ((result.data && result.data.items) || []).length + " 段数据" + (job.pagesDone ? "，翻了 " + job.pagesDone + " 页" : "") + "）"
+          text: !result.ok ? "" : job.kind === "capture" ? (result.data && result.data.rows ? "整理出 " + result.data.rows.length + " 行" : "截到了 " + ((result.data && result.data.items) || []).length + " 段数据") + (job.pagesDone ? "（翻了 " + job.pagesDone + " 页）" : "")
             : job.kind === "fetch" ? "请求完了（" + ((result.data && result.data.results) || []).length + " 个接口）" : job.kind === "page" ? "读到了（正文 " + ((result.data && result.data.textChars) || 0) + " 字）" : job.kind === "ahrefs" ? "读到了（" + ((result.data && result.data.series) || []).length + " 条曲线、" + Object.keys((result.data && result.data.metrics) || {}).length + " 个指标）"
             : "取到了（" + ((result.data && result.data.points) || []).length + " 个点）" });
         if (result.ok && job.keepTab) chrome.tabs.update(tabId, { active: true }).catch(function () {});
@@ -494,7 +494,7 @@ function startRemoteJob(msg, from) {
             noForeground: !capture, // fetch 不用页面画出来，后台标签页就够；capture 要页面自己去请求，后台叫不醒时切到前台
             timeoutMs: msg.timeoutMs,
             fields: capture
-              ? { kind: "capture", origin: origin, match: msg.match || "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
+              ? { kind: "capture", origin: origin, match: msg.match || "", extract: msg.extract || "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
                 items: [], seen: [], bytes: 0, lastAt: null, pagesDone: 0, pagerEnd: "", loginSeen: false }
               : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, transport: msg.transport === "xhr" ? "xhr" : "fetch", fetching: false },
             label: { keyword: host, range: capture ? "截数据" + (msg.pager ? "（翻页）" : "") : "请求接口 ×" + msg.requests.length, geo: "" },
@@ -546,6 +546,12 @@ function captureCheck(tabId) {
     if (now < (job.loadedAt || job.startedAt) + job.minMs) { scheduleCaptureCheck(tabId, (job.loadedAt || job.startedAt) + job.minMs - now); return; }
     // 一段要的数据都还没来（页面还在加载，或接口都还没打）：接着等，到点由超时收尾（那时把请求过的接口清单交回去，摸接口用）
     if (!job.items.length) { scheduleCaptureCheck(tabId, job.quietMs); return; }
+    // 点了「下一页」却没有新数据进来：翻到底了（或者到了账号能看的上限，比如官方账号只给前 100 条），别一直点下去
+    if (job.pager && job.pagesDone > 0 && !job.pagerEnd && !job.items.some(function (it) { return it.page === job.pagesDone; })) {
+      return serial(function () {
+        return loadJobs().then(function (jobs2) { var j = jobs2[tabId]; if (j) { j.pagerEnd = "点了下一页没有新数据（到底了，或账号只能看到这么多）"; return saveJobs(jobs2); } });
+      }).then(function () { return finishCapture(tabId, false); });
+    }
     if (job.pager && !job.pagerEnd && job.pagesDone < job.pager.times && job.items.length < job.maxItems) return turnPage(tabId);
     return finishCapture(tabId, false);
   });
@@ -561,7 +567,7 @@ function turnPage(tabId) {
     });
   }).then(function (job) {
     if (!job) return;
-    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.clickNext, args: [job.pager.selector] }).then(function (res) {
+    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: G.clickNext, args: [job.pager.selector || "", job.pager.near || ""] }).then(function (res) {
       return (res && res[0] && res[0].result) || { ok: false, why: "没点成" };
     }, function (e) { return { ok: false, why: String((e && e.message) || e).slice(0, 100) }; }).then(function (r) {
       return serial(function () {
@@ -590,8 +596,15 @@ function finishCapture(tabId, timedOut) {
       if (!job.items.length && !job.seen.length) {
         return finish(tabId, { ok: false, error: (timedOut ? "到点了，" : "") + "页面没请求任何数据（可能没加载出来、要登录，或网站改了版）——已把那个标签页切到前台" }, true);
       }
-      return finish(tabId, { ok: true, data: { kind: "capture", url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
-        pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut, items: job.items, seen: job.seen } });
+      var head = { kind: "capture", url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
+        pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut };
+      if (job.extract) {
+        // 带解析器：只交整理好的行（不带原始数据、不带接口清单）；一行都没整理出来才算失败
+        var x = G.runExtract(job.extract, job.items) || { rows: [] };
+        if (!x.rows.length) return finish(tabId, { ok: false, error: "页面没请求到要的数据（截到 " + job.items.length + " 段，整理出 0 行）——可能要登录、没有数据，或网站改了版；已把那个标签页切到前台" }, true);
+        return finish(tabId, { ok: true, data: Object.assign(head, { extract: job.extract }, x) });
+      }
+      return finish(tabId, { ok: true, data: Object.assign(head, { items: job.items, seen: job.seen }) });
     });
   });
 }

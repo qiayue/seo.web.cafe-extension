@@ -56,6 +56,16 @@ const swPage = `<!doctype html><title>Similarweb (mock)</title><main><table id=t
   document.querySelector("button.next").addEventListener("click", function () { page++; load(); });
   setTimeout(load, 300);
 </script>`;
+// 假的 Similarweb「着陆页」：接口形状照线上 websiteOrganicLandingPagesV2；翻页条是「|< < [1] out of 3 > >|」，箭头是 div 里的 svg（不是 button）
+const lpPage = `<!doctype html><title>着陆页</title><main><table id=t></table>
+  <div class="pg"><div class="a"><svg width=10 height=10><path d="M0 0"/></svg></div><div class="a"><svg width=10 height=10></svg></div>
+  <input id=n value=1><span>out of 3</span><div class="a nx"><svg width=10 height=10></svg></div><div class="a"><svg width=10 height=10></svg></div></div></main><script>
+  var page = 1;
+  function load() { var x = new XMLHttpRequest(); x.open("GET", "/api/websiteOrganicLandingPagesV2?key=github.io&from=2026%7C09%7C04&to=2026%7C10%7C01&isWindow=true&latest=28d&page=" + page);
+    x.onload = function () { document.getElementById("n").value = page; }; x.send(); }
+  document.querySelector(".nx").addEventListener("click", function () { if (page < 3) { page++; load(); } });
+  setTimeout(load, 300);
+</script>`;
 function handle(req, res) {
   const host = String(req.headers.host || "").split(":")[0];
   const u = new URL(req.url, "https://" + host);
@@ -78,6 +88,12 @@ function handle(req, res) {
       const p = Number(u.searchParams.get("page")) || 1;
       return send(200, "application/json", JSON.stringify({ host, page: p, rows: [1, 2, 3].map((i) => host + "-p" + p + "-" + i), cookie: String(req.headers.cookie || "") }));
     }
+    if (u.pathname === "/api/websiteOrganicLandingPagesV2") {
+      const p = Number(u.searchParams.get("page")) || 1;
+      return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map((i) => ({ Url: "s" + p + i + ".github.io/x", Clicks: 100 * p + i,
+        PrevClicks: 0, ClicksChange: 1, ClicksShare: 0.001, KeywordsCount: 3, TopKeyword: "kw" + p + i, ChangeState: "New", Trend: { "2026-09-25": 5 } })) }));
+    }
+    if (u.pathname === "/lp") return send(200, "text/html; charset=utf-8", lpPage);
     if (u.pathname === "/api/other") return send(200, "application/json", JSON.stringify({ other: true }));
     if (u.pathname === "/") {
       res.writeHead(200, { "content-type": "text/html", "set-cookie": "sw_session=" + host + "; Path=/; Secure; SameSite=Lax" });
@@ -187,6 +203,14 @@ async function waitReport(rid, ms = 40000) {
     check("fetch 也能走页面自己的 XHR", r4 && r4.ok && JSON.parse(r4.data.results[0].body).page === 6, r4 && r4.error);
     const r5 = await waitReport(id("5"));
     check("page 带回 \"out of\" 附近那一块 HTML（看得到翻页按钮）", r5 && r5.ok && /class="next"/.test(r5.data.around || ""), r5 && (r5.error || String(r5.data.around).slice(0, 80)));
+
+    // ③c 解析器 + 按「out of」找下一页：交回去的只有整理好的行
+    queue.push({ requestId: id("6"), kind: "capture", site: "similarweb", path: "/lp", extract: "sw_landing", quietMs: 1500, minMs: 0, pager: { near: "out of", times: 10, waitMs: 1200 } });
+    await sw.evaluate(() => agentPoll());
+    const r6 = await waitReport(id("6"), 60000);
+    const d6 = (r6 && r6.data) || {};
+    check("sw_landing：按「out of」后面的箭头一路翻完，交回整理好的行（没有原始数据）", r6 && r6.ok && (d6.rows || []).length === 6 && d6.total === 350121 && d6.pages === 4 && /没有新数据/.test(d6.pagerEnd) && !d6.items && !d6.seen
+      && d6.rows[5].url === "s32.github.io/x" && d6.rows[0].topKeyword === "kw11" && d6.period.latest === "28d", r6 && (r6.error || JSON.stringify(d6).slice(0, 200)));
 
     // ④ 不认识的网站
     queue.push({ requestId: id("3"), kind: "page", site: "gmail", path: "/" });
