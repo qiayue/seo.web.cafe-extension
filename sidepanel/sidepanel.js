@@ -507,22 +507,23 @@
   }
 
   // ---------- 远程任务：new.web.cafe 派来的任务（0.11.0 起，见 background.js ⑥） ----------
-  // 连接：到 new.web.cafe 后台「插件任务」点「连接插件」，令牌经那个页面里的内容脚本自动交过来；也可以手动粘。
+  // 连接：到 new.web.cafe 后台「插件任务」点「连接插件」，令牌经那个页面里的内容脚本交过来（后台先确认是管理员的令牌才存）。
+  // ⚠️ 只给管理员：没连上（普通用户）整块不显示，也就看不到 Similarweb 地址这些设置
   // 状态（最近一次去领任务的时间、正在做哪张、上一张做成没有）后台写在 storage.local.agentStatus
   var G = self.GefeiAgentJobs;
-  var AGENT_PAGE = G.AGENT_SERVERS[0] + "/manage/ext-agent";
   function ago(t) {
     var s = Math.max(0, Math.round((Date.now() - t) / 1000));
     return s < 60 ? s + " 秒前" : s < 3600 ? Math.round(s / 60) + " 分钟前" : Math.round(s / 3600) + " 小时前";
   }
   function renderAgent() {
-    chrome.storage.local.get(["agentToken", "agentOn", "agentStatus"]).then(function (r) {
+    chrome.storage.local.get(["agentToken", "agentOn", "agentStatus", "agentAccount"]).then(function (r) {
       var st = r.agentStatus || {}, on = r.agentOn !== false;
+      $("agentBox").hidden = !r.agentToken;
       $("agentOn").checked = on;
       var lines = [];
-      if (!r.agentToken) lines.push("还没连接：点下面的按钮，到 new.web.cafe 后台「插件任务」点「连接插件」。");
-      else {
-        lines.push(on ? "已连接 new.web.cafe" + (st.at ? "，" + ago(st.at) + "去领过任务" : "，等第一次去领任务") + "。" : "已连接，但现在不接任务（勾上上面那个框才接）。");
+      if (r.agentToken) {
+        var who = r.agentAccount ? "（管理员 " + r.agentAccount + "）" : "";
+        lines.push(on ? "已连接 new.web.cafe" + who + (st.at ? "，" + ago(st.at) + "去领过任务" : "，等第一次去领任务") + "。" : "已连接" + who + "，但现在不接任务（勾上上面那个框才接）。");
         if (st.error) lines.push("⚠ " + st.error);
         if (st.current && st.current.at && Date.now() - st.current.at < 6 * 60000 && !(st.lastDone && st.lastDone.id === st.current.id)) lines.push("正在做：" + st.current.kind + " " + String(st.current.url || "").replace(/^https:\/\//, "").slice(0, 60));
         if (st.lastDone) lines.push("上一张（" + ago(st.lastDone.at) + "）：" + (st.lastDone.ok ? "交回了" : "没取到——" + (st.lastDone.error || "原因不明")));
@@ -532,20 +533,12 @@
   }
   renderAgent();
   setInterval(renderAgent, 5000);
-  chrome.storage.onChanged.addListener(function (changes, area) { if (area === "local" && (changes.agentStatus || changes.agentToken || changes.agentOn)) renderAgent(); });
+  chrome.storage.onChanged.addListener(function (changes, area) { if (area === "local" && (changes.agentStatus || changes.agentToken || changes.agentOn || changes.agentAccount)) renderAgent(); });
   $("agentOn").addEventListener("change", function () { chrome.storage.local.set({ agentOn: $("agentOn").checked }); });
-  $("agentConnect").addEventListener("click", function () { chrome.tabs.create({ url: AGENT_PAGE }); });
   $("agentPollNow").addEventListener("click", function () { chrome.runtime.sendMessage({ type: "agent:poll" }).catch(function () {}); setTimeout(renderAgent, 1500); });
-  $("agentSave").addEventListener("click", function () {
-    var t = $("agentToken").value.trim();
-    if (!/^wcx_[a-f0-9]{48}$/.test(t)) { $("agentSaved").textContent = "令牌不对：是 wcx_ 开头的一长串"; return; }
-    chrome.storage.local.set({ agentToken: t, agentOn: true, agentServer: G.AGENT_SERVERS[0], agentStatus: { pairedAt: Date.now() } }).then(function () {
-      $("agentToken").value = "";
-      $("agentSaved").textContent = "已保存";
-    });
-  });
   $("agentForget").addEventListener("click", function () {
-    chrome.storage.local.remove(["agentToken", "agentStatus"]).then(function () { $("agentSaved").textContent = "已断开（new.web.cafe 后台那边也点一下「断开」，令牌就彻底作废）"; });
+    // 只清插件这边；new.web.cafe 后台那边也点一下「断开」，令牌才彻底作废
+    chrome.storage.local.remove(["agentToken", "agentStatus", "agentAccount"]);
   });
 
   // Similarweb 地址：远程任务里只写「Similarweb + 路径」，域名用这里填的（默认官方；用共享账号就填镜像站）

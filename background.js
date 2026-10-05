@@ -17,7 +17,9 @@
 //      用你登录着的账号做完、把结果交回 new.web.cafe。任务里只写「哪个网站 + 路径」（lib/agent-jobs.js），域名用你在侧边栏
 //      「设置」里填的地址（Similarweb 官方或共享账号的镜像站）。三类：page 读网页；capture 截下页面自己请求回来的数据
 //      （content/capture-hook.js，可以点「下一页」翻页）；fetch 在网页里带着登录态请求它自己的接口。一次只做一张，做完马上领下一张。
-//      要先在 new.web.cafe 后台「插件任务」点「连接插件」（content/agent-bridge.js 把令牌交过来），或者在侧边栏粘令牌。
+//      要先在 new.web.cafe 后台「插件任务」点「连接插件」（content/agent-bridge.js 把令牌交过来）。
+//      ⚠️ 只给管理员（插件普通用户也在用）：配对时先拿令牌问 new.web.cafe「是不是管理员的」，是才存；之后哪一次回 403
+//      （配对的账号不再是管理员）就清掉令牌、不再领任务。没配对的插件不定闹钟、不去 new.web.cafe，侧边栏也不显示这一块。
 //
 // 看得见在干活：每个取数任务一接单就回「收到」（对话页转给服务器——服务器 20 秒没等到「收到」就不再干等），
 // 之后每一步（打开谷歌趋势 / 页面加载完 / 切到前台 / 曲线到了）都报一句进度；同时记进任务日志
@@ -678,6 +680,12 @@ function agentApi(method, body) {
     }).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (j) {
         if (res.status === 401) { agentStatus({ error: "令牌失效了（在 new.web.cafe 被断开，或者重新配对过）：到 new.web.cafe 后台「插件任务」重新连接", at: Date.now() }); throw new Error("unpaired"); }
+        if (res.status === 403) {
+          // 配对的账号不再是管理员：清掉令牌，闹钟随之撤掉（storage.onChanged → agentSetup），侧边栏这一块也收起来
+          chrome.storage.local.remove(["agentToken", "agentAccount"]).catch(function () {});
+          agentStatus({ error: "配对这个插件的账号不是管理员，已断开远程任务", at: Date.now() });
+          throw new Error("unpaired");
+        }
         return j;
       });
     });
@@ -802,7 +810,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     if (!sender.tab || G.AGENT_SERVERS.indexOf(sender.origin) < 0) { sendResponse({ ok: false, error: "只认 new.web.cafe 发来的配对" }); return false; }
     var tok = String(msg.token || "");
     if (!/^wcx_[a-f0-9]{48}$/.test(tok)) { sendResponse({ ok: false, error: "令牌格式不对" }); return false; }
-    chrome.storage.local.set({ agentToken: tok, agentOn: true, agentServer: sender.origin, agentStatus: { pairedAt: Date.now() } })
+    // 先问 new.web.cafe：这个令牌是不是管理员的。是才存（普通用户的插件不该接远程任务）
+    fetch(sender.origin + "/api/ext-agent/jobs?whoami=1", { cache: "no-store", headers: { Authorization: "Bearer " + tok, "X-Ext-Version": chrome.runtime.getManifest().version } })
+      .then(function (res) { return res.json().catch(function () { return {}; }).then(function (j) { return { status: res.status, j: j }; }); })
+      .then(function (r) {
+        if (!(r.status === 200 && r.j && r.j.ok && r.j.admin)) throw new Error(r.status === 403 ? "这个账号不是管理员，远程任务只给管理员用" : (r.j && r.j.error) || "new.web.cafe 没认这个令牌（" + r.status + "）");
+        return chrome.storage.local.set({ agentToken: tok, agentOn: true, agentServer: sender.origin, agentAccount: String(r.j.name || "").slice(0, 40), agentStatus: { pairedAt: Date.now() } });
+      })
       .then(function () { sendResponse({ ok: true }); }, function (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); });
     return true;
   }

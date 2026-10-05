@@ -4,7 +4,8 @@
 //   · new.web.cafe：假的后台「插件任务」页（照 PageComponent 的协议 postMessage 配对令牌）+ 假的 /api/ext-agent/jobs（发任务、收结果）；
 //   · pro.similarweb.com / sim.3ue.com：假的 Similarweb（官方 / 共享账号镜像站），单页应用自己去请求一页一页的着陆页数据，
 //     底下有「下一页」按钮，翻到第 3 页按钮变灰。
-// 钉住：① 配对令牌经页面交给插件；② capture 截下页面自己请求的数据、点「下一页」一路翻到最后一页、交回、关掉标签页；
+// 钉住：⓪ 只给管理员：不是管理员的令牌配不上、普通用户侧边栏看不到这一块、配对后账号被撤了管理员就清掉令牌；
+//       ① 配对令牌经页面交给插件；② capture 截下页面自己请求的数据、点「下一页」一路翻到最后一页、交回、关掉标签页；
 //       ③ 设置成镜像站后任务开的是镜像站；fetch 在页面里带登录态请求接口；④ 不认识的网站不开、如实交回原因；
 //       ⑤ 进度报给 new.web.cafe；⑥ 你自己开的 Similarweb 标签页一概不抄；⑦ 令牌失效时停下并说清楚。
 "use strict";
@@ -36,6 +37,7 @@ const TOKEN = "wcx_" + "c".repeat(48);
 const queue = [];          // 等插件来领的任务
 const reports = [];        // 插件交上来的进度 / 结果
 let authFail = false;
+let admin = false;         // 配对令牌对应的账号此刻是不是管理员
 const pairPage = `<!doctype html><title>插件任务</title><script>
   window.__paired = null;
   window.addEventListener("message", function (e) { if (e.data && e.data.source === "gefei-seo-ext" && e.data.type === "agent:paired") window.__paired = e.data; });
@@ -61,6 +63,8 @@ function handle(req, res) {
   if (host === "new.web.cafe") {
     if (u.pathname === "/api/ext-agent/jobs") {
       if (authFail || req.headers.authorization !== "Bearer " + TOKEN) return send(401, "application/json", JSON.stringify({ ok: false, code: "unpaired" }));
+      if (!admin) return send(403, "application/json", JSON.stringify({ ok: false, code: "not_admin", error: "不是管理员" }));
+      if (u.searchParams.get("whoami") === "1") return send(200, "application/json", JSON.stringify({ ok: true, admin: true, name: "哥飞" }));
       if (req.method === "GET") return send(200, "application/json", JSON.stringify({ ok: true, jobs: queue.length ? [queue.shift()] : [], v: req.headers["x-ext-version"] }));
       let raw = "";
       req.on("data", (c) => { raw += c; });
@@ -117,18 +121,34 @@ async function waitReport(rid, ms = 40000) {
     const swTabs = () => context.pages().filter((p) => /similarweb|3ue/.test(p.url()));
 
     // ① 配对
-    const admin = await context.newPage();
-    await admin.goto("https://new.web.cafe/manage/ext-agent");
-    await admin.waitForFunction(() => window.__ext(), null, { timeout: 5000 });
-    check("new.web.cafe 页面认得出插件（<html> 上盖了版本章）", /^\d+\.\d+\.\d+$/.test(await admin.evaluate(() => window.__ext())));
-    await admin.evaluate(() => window.__pair("not-a-token"));
-    await admin.waitForFunction(() => window.__paired, null, { timeout: 5000 });
-    check("格式不对的令牌不收", (await admin.evaluate(() => window.__paired)).ok === false);
-    await admin.evaluate(() => { window.__paired = null; });
-    await admin.evaluate((t) => window.__pair(t), TOKEN);
-    await admin.waitForFunction(() => window.__paired, null, { timeout: 5000 });
-    const paired = await admin.evaluate(() => window.__paired);
+    const adminPage = await context.newPage();
+    await adminPage.goto("https://new.web.cafe/manage/ext-agent");
+    await adminPage.waitForFunction(() => window.__ext(), null, { timeout: 5000 });
+    check("new.web.cafe 页面认得出插件（<html> 上盖了版本章）", /^\d+\.\d+\.\d+$/.test(await adminPage.evaluate(() => window.__ext())));
+    await adminPage.evaluate(() => window.__pair("not-a-token"));
+    await adminPage.waitForFunction(() => window.__paired, null, { timeout: 5000 });
+    check("格式不对的令牌不收", (await adminPage.evaluate(() => window.__paired)).ok === false);
+    // ⓪ 普通用户：没配对时侧边栏看不到远程任务这一块、不定闹钟
+    const panel0 = await context.newPage();
+    await panel0.goto("chrome-extension://" + new URL(sw.url()).host + "/sidepanel/sidepanel.html");
+    await sleep(500);
+    check("普通用户（没配对）：侧边栏看不到「远程任务」和 Similarweb 设置，也不定闹钟", await panel0.isHidden("#agentBox") && !(await sw.evaluate(() => chrome.alarms.get("gefei-agent-poll"))));
+    // ⓪ 令牌格式对、但服务器说不是管理员：不存
+    await adminPage.evaluate(() => { window.__paired = null; });
+    await adminPage.evaluate((t) => window.__pair(t), TOKEN);
+    await adminPage.waitForFunction(() => window.__paired, null, { timeout: 5000 });
+    const notAdmin = await adminPage.evaluate(() => window.__paired);
+    const stored0 = await sw.evaluate(() => chrome.storage.local.get("agentToken"));
+    check("不是管理员的令牌：插件问过服务器后不收、说清楚原因", notAdmin.ok === false && /不是管理员/.test(notAdmin.error) && !stored0.agentToken, notAdmin.error);
+    admin = true;
+    await adminPage.evaluate(() => { window.__paired = null; });
+    await adminPage.evaluate((t) => window.__pair(t), TOKEN);
+    await adminPage.waitForFunction(() => window.__paired, null, { timeout: 5000 });
+    const paired = await adminPage.evaluate(() => window.__paired);
     const stored = await sw.evaluate(() => chrome.storage.local.get(["agentToken", "agentOn", "agentServer"]));
+    await panel0.waitForFunction(() => !document.getElementById("agentBox").hidden, null, { timeout: 3000 }).catch(() => {});
+    check("管理员连上之后侧边栏才显示「远程任务」，写明是哪个管理员", !(await panel0.isHidden("#agentBox")) && /管理员 哥飞/.test(await panel0.textContent("#agentState")));
+    await panel0.close();
     check("配对：令牌交给插件、存下来、打开接任务", paired.ok === true && stored.agentToken.length === 52 && stored.agentOn === true && stored.agentServer === "https://new.web.cafe", JSON.stringify(paired));
     check("每分钟一次的闹钟定上了", !!(await sw.evaluate(() => chrome.alarms.get("gefei-agent-poll"))));
 
@@ -172,22 +192,35 @@ async function waitReport(rid, ms = 40000) {
     check("你自己开的 Similarweb 标签页：插件不抄、不交（没有任务）", leaked === 0 && reports.length === before);
     await own.close();
 
-    // ⑦ 令牌失效
+    // 侧边栏能打开、远程任务那一块照着状态显示（管理员连着的时候）
+    const panel = await context.newPage();
+    const errs = [];
+    panel.on("pageerror", (e) => errs.push(String(e)));
+    await panel.goto("chrome-extension://" + new URL(sw.url()).host + "/sidepanel/sidepanel.html");
+    await panel.waitForFunction(() => document.getElementById("similarwebBase").value === "https://sim.3ue.com", null, { timeout: 3000 }).catch(() => {});
+    check("侧边栏「远程任务」里显示 Similarweb 地址（镜像站）、已允许，没有脚本错误", (await panel.inputValue("#similarwebBase")) === "https://sim.3ue.com" && /已允许读 sim\.3ue\.com/.test(await panel.textContent("#similarwebPerm")) && !errs.length, errs.join("; "));
+
+    // ⓪ 配对之后账号被撤了管理员：下一次去领就 403，清掉令牌、收起侧边栏这一块
+    admin = false;
+    await sw.evaluate(() => agentPoll());
+    await sleep(800);
+    const st403 = await sw.evaluate(() => chrome.storage.local.get(["agentToken", "agentStatus"]));
+    check("账号不再是管理员：清掉令牌、不再领任务、说明原因", !st403.agentToken && /不是管理员/.test((st403.agentStatus || {}).error || ""), (st403.agentStatus || {}).error);
+    await panel.waitForFunction(() => document.getElementById("agentBox").hidden, null, { timeout: 3000 }).catch(() => {});
+    check("侧边栏「远程任务」随之收起", await panel.isHidden("#agentBox"));
+
+    // ⑦ 令牌失效（重新配对上，再让服务器说令牌不对）
+    admin = true;
+    await adminPage.evaluate(() => { window.__paired = null; });
+    await adminPage.evaluate((t) => window.__pair(t), TOKEN);
+    await adminPage.waitForFunction(() => window.__paired, null, { timeout: 5000 });
     authFail = true;
     await sw.evaluate(() => agentPoll());
     await sleep(500);
     const st = await sw.evaluate(() => chrome.storage.local.get("agentStatus").then((r) => r.agentStatus || {}));
     check("令牌失效：记下原因（侧边栏照着显示），不乱做", /令牌失效/.test(st.error || ""), st.error);
 
-    // 侧边栏能打开、远程任务那一块照着状态显示
-    const panel = await context.newPage();
-    const errs = [];
-    panel.on("pageerror", (e) => errs.push(String(e)));
-    await panel.goto("chrome-extension://" + new URL(sw.url()).host + "/sidepanel/sidepanel.html");
-    await panel.waitForFunction(() => /令牌失效/.test(document.getElementById("agentState").textContent), null, { timeout: 5000 }).catch(() => {});
-    check("侧边栏「远程任务」显示状态，没有脚本错误", /令牌失效/.test(await panel.textContent("#agentState")) && !errs.length, errs.join("; "));
-    await panel.waitForFunction(() => document.getElementById("similarwebBase").value === "https://sim.3ue.com", null, { timeout: 3000 }).catch(() => {});
-    check("侧边栏「设置」里显示 Similarweb 地址（镜像站）、已允许", (await panel.inputValue("#similarwebBase")) === "https://sim.3ue.com" && /已允许读 sim\.3ue\.com/.test(await panel.textContent("#similarwebPerm")));
+    check("令牌失效：侧边栏照着显示原因", await (async () => { await panel.waitForFunction(() => /令牌失效/.test(document.getElementById("agentState").textContent), null, { timeout: 5000 }).catch(() => {}); return /令牌失效/.test(await panel.textContent("#agentState")); })());
   } catch (e) {
     failed++;
     console.log("  ✕ 出错：" + (e && e.stack || e));
