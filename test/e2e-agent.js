@@ -38,6 +38,7 @@ const queue = [];          // 等插件来领的任务
 const reports = [];        // 插件交上来的进度 / 结果
 let authFail = false;
 let admin = false;         // 配对令牌对应的账号此刻是不是管理员
+const cancelIds = new Set(); // 这些任务在服务器上「已撤销」：报进度回 cancelled
 const pairPage = `<!doctype html><title>插件任务</title><script>
   window.__paired = null;
   window.addEventListener("message", function (e) { if (e.data && e.data.source === "gefei-seo-ext" && e.data.type === "agent:paired") window.__paired = e.data; });
@@ -78,7 +79,12 @@ function handle(req, res) {
       if (req.method === "GET") return send(200, "application/json", JSON.stringify({ ok: true, jobs: queue.length ? [queue.shift()] : [], v: req.headers["x-ext-version"] }));
       let raw = "";
       req.on("data", (c) => { raw += c; });
-      req.on("end", () => { try { reports.push(JSON.parse(raw)); } catch {} send(200, "application/json", JSON.stringify({ ok: true })); });
+      req.on("end", () => {
+        let b = null;
+        try { b = JSON.parse(raw); reports.push(b); } catch {}
+        if (b && cancelIds.has(b.requestId)) return send(409, "application/json", JSON.stringify({ ok: false, cancelled: true, error: "已撤销" }));
+        send(200, "application/json", JSON.stringify({ ok: true }));
+      });
       return;
     }
     return send(200, "text/html; charset=utf-8", pairPage);
@@ -137,6 +143,8 @@ async function waitReport(rid, ms = 40000) {
   try {
     const sw = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker", { timeout: 10000 });
     const swTabs = () => context.pages().filter((p) => /similarweb|3ue/.test(p.url()));
+    // 「像人一样看页面」的时长在测试里调短（真跑是每页看 6~14 秒、4~7 页歇 25~70 秒）
+    await sw.evaluate(() => { const H = self.GefeiAgentJobs.HUMAN; H.readMs = [300, 600]; H.restEvery = [2, 3]; H.restMs = [800, 1200]; H.betweenJobsMs = [100, 200]; });
 
     // ① 配对
     const adminPage = await context.newPage();
@@ -173,7 +181,7 @@ async function waitReport(rid, ms = 40000) {
     // ② capture + 翻页（默认官方地址）
     queue.push({ requestId: id("1"), kind: "capture", site: "similarweb", path: "/#/digitalsuite/landing?key=github.io", match: "/api/landing", quietMs: 1500, minMs: 0,
       pager: { selector: "button.next", times: 8, waitMs: 1200 } });
-    await sw.evaluate(() => agentPoll());
+    await sw.evaluate(() => agentPoll(true));
     const r1 = await waitReport(id("1"), 60000);
     const items = (r1 && r1.data && r1.data.items) || [];
     const pagesGot = items.map((x) => JSON.parse(x.body).page);
@@ -182,7 +190,8 @@ async function waitReport(rid, ms = 40000) {
     check("match 之外的接口只记进清单、不收数据；翻到底说明原因", r1 && r1.data.seen.some((s) => /\/api\/other/.test(s.url)) && !items.some((x) => /other/.test(x.url)) && r1.data.pagerEnd === "已经是最后一页", r1 && r1.data.pagerEnd);
     const xhrSeen = r1 && r1.data.seen.find((x) => /page=2/.test(x.url));
     check("记下页面自己发请求带的请求头（Authorization 只记有没有，不记值）", xhrSeen && xhrSeen.via === "xhr" && xhrSeen.reqHeaders["x-sw-page"] === "landing" && !/secret/.test(JSON.stringify(xhrSeen.reqHeaders)), JSON.stringify(xhrSeen && xhrSeen.reqHeaders));
-    check("进度报给了 new.web.cafe（页面加载 / 翻页）", reports.some((x) => x.requestId === id("1") && x.stage === "progress" && /翻到第 2 页/.test(x.note)));
+    check("像人一样：看了几页歇一会儿（进度里写着歇几秒）", reports.some((x) => x.requestId === id("1") && x.stage === "progress" && /看了 \d+ 页，歇 \d+ 秒/.test(x.note)));
+        check("进度报给了 new.web.cafe（页面加载 / 翻页）", reports.some((x) => x.requestId === id("1") && x.stage === "progress" && /翻到第 2 页/.test(x.note)));
     await sleep(800);
     check("做完关掉标签页", swTabs().length === 0, swTabs().map((p) => p.url()).join());
 
@@ -190,7 +199,7 @@ async function waitReport(rid, ms = 40000) {
     await sw.evaluate(() => chrome.storage.local.set({ similarwebBase: "https://sim.3ue.com" }));
     await sleep(300);
     queue.push({ requestId: id("2"), kind: "fetch", site: "similarweb", path: "/", requests: ["/api/landing?page=4", { path: "/api/landing?page=5", headers: { "x-requested-with": "XMLHttpRequest" } }], delayMs: 300 });
-    await sw.evaluate(() => agentPoll());
+    await sw.evaluate(() => agentPoll(true));
     const r2 = await waitReport(id("2"));
     const res2 = (r2 && r2.data && r2.data.results) || [];
     const b2 = res2.map((x) => JSON.parse(x.body || "{}"));
@@ -200,7 +209,7 @@ async function waitReport(rid, ms = 40000) {
     // ③b fetch 走页面自己的 XHR；page 带回某段文字附近的 HTML（找翻页按钮用）
     queue.push({ requestId: id("4"), kind: "fetch", site: "similarweb", path: "/", transport: "xhr", requests: ["/api/landing?page=6"], delayMs: 300 });
     queue.push({ requestId: id("5"), kind: "page", site: "similarweb", path: "/", around: "out of", minMs: 1500 });
-    await sw.evaluate(() => agentPoll());
+    await sw.evaluate(() => agentPoll(true));
     const r4 = await waitReport(id("4"));
     check("fetch 也能走页面自己的 XHR", r4 && r4.ok && JSON.parse(r4.data.results[0].body).page === 6, r4 && r4.error);
     const r5 = await waitReport(id("5"));
@@ -208,16 +217,24 @@ async function waitReport(rid, ms = 40000) {
 
     // ③c 解析器 + 按「out of」找下一页：交回去的只有整理好的行
     queue.push({ requestId: id("6"), kind: "capture", site: "similarweb", path: "/lp", extract: "sw_landing", quietMs: 1500, minMs: 0, pager: { near: "out of", times: 10, waitMs: 1200 } });
-    await sw.evaluate(() => agentPoll());
+    await sw.evaluate(() => agentPoll(true));
     const r6 = await waitReport(id("6"), 60000);
     const d6 = (r6 && r6.data) || {};
     check("sw_landing：按「out of」后面的箭头往后翻，交回整理好的行（没有原始数据）", r6 && r6.ok && (d6.rows || []).length === 4 && d6.total === 350121 && !d6.items && !d6.seen
       && d6.rows[3].url === "s22.github.io/x" && d6.rows[0].topKeyword === "kw11" && d6.period.latest === "28d", r6 && (r6.error || JSON.stringify(d6).slice(0, 200)));
     check("翻到要升级才看得到的那一页：停止翻页，这一页整页丢掉，说清楚原因", r6 && /第 3 页起数据不完整（2\/2 行要升级才看得到）/.test(d6.pagerEnd) && !d6.rows.some((r) => /\*/.test(r.url)), d6.pagerEnd);
 
+    // ③d 在 new.web.cafe 被撤销：插件下一次报进度时听说了，停下、关掉标签页
+    cancelIds.add(id("7"));
+    queue.push({ requestId: id("7"), kind: "capture", site: "similarweb", path: "/lp", extract: "sw_landing", quietMs: 1500, minMs: 0, pager: { near: "out of", times: 10, waitMs: 1200 } });
+    await sw.evaluate(() => agentPoll(true));
+    let gone = false;
+    for (let t = 0; t < 40 && !gone; t++) { await sleep(500); gone = !(await sw.evaluate(() => chrome.storage.session.get("jobs").then((r) => Object.keys(r.jobs || {}).length))); }
+    check("任务在 new.web.cafe 被撤销：插件停下、关掉标签页，不接着翻", gone && swTabs().length === 0, swTabs().map((p) => p.url()).join());
+
     // ④ 不认识的网站
     queue.push({ requestId: id("3"), kind: "page", site: "gmail", path: "/" });
-    await sw.evaluate(() => agentPoll());
+    await sw.evaluate(() => agentPoll(true));
     const r3 = await waitReport(id("3"));
     check("不认识的网站：不开，如实交回原因", r3 && r3.ok === false && /插件不开这个网站/.test(r3.error), r3 && r3.error);
 
@@ -240,7 +257,7 @@ async function waitReport(rid, ms = 40000) {
 
     // ⓪ 配对之后账号被撤了管理员：下一次去领就 403，清掉令牌、收起侧边栏这一块
     admin = false;
-    await sw.evaluate(() => agentPoll());
+    await sw.evaluate(() => agentPoll(true));
     await sleep(800);
     const st403 = await sw.evaluate(() => chrome.storage.local.get(["agentToken", "agentStatus"]));
     check("账号不再是管理员：清掉令牌、不再领任务、说明原因", !st403.agentToken && /不是管理员/.test((st403.agentStatus || {}).error || ""), (st403.agentStatus || {}).error);
@@ -253,7 +270,7 @@ async function waitReport(rid, ms = 40000) {
     await adminPage.evaluate((t) => window.__pair(t), TOKEN);
     await adminPage.waitForFunction(() => window.__paired, null, { timeout: 5000 });
     authFail = true;
-    await sw.evaluate(() => agentPoll());
+    await sw.evaluate(() => agentPoll(true));
     await sleep(500);
     const st = await sw.evaluate(() => chrome.storage.local.get("agentStatus").then((r) => r.agentStatus || {}));
     check("令牌失效：记下原因（侧边栏照着显示），不乱做", /令牌失效/.test(st.error || ""), st.error);

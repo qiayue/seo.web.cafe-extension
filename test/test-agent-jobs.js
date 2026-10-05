@@ -38,12 +38,12 @@ check("fetch：只请求同一个网站的路径，Cookie / Authorization 请求
 });
 check("capture：翻页要有按钮选择器，次数有上限", () => {
   const j = G.normAgentJob({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pager: { selector: "button[aria-label=next]", times: 5000 } }, {});
-  assert.equal(j.pager.times, 400);
+  assert.equal(j.pager.times, 19, "最多 20 页");
   bad({ requestId: ID, kind: "capture", site: "similarweb", path: "/", pager: { selector: " " } });
   bad({ requestId: ID, kind: "capture", site: "similarweb", path: "/", match: "(" });
 });
 check("在网页里执行的两个函数能单独序列化（不引用外面的变量）", () => {
-  for (const f of [G.fetchInPage, G.clickNext]) assert.ok(!/\bG\.|\bSITES\b|\bMAX_/.test(f.toString()), f.name);
+  for (const f of [G.fetchInPage, G.clickNext, G.browseLikeHuman]) assert.ok(!/\bG\.|\bSITES\b|\bMAX_/.test(f.toString()), f.name);
 });
 check("Similarweb 着陆页：在插件里就整理成行（去重、带子站、周趋势按日期排好），交回去的只有这些", () => {
   const page = (n, urls) => ({ url: "https://sim.3ue.com/api/websiteOrganicLandingPagesV2?from=2026%7C09%7C04&to=2026%7C10%7C01&isWindow=true&latest=28d&key=github.io", page: n,
