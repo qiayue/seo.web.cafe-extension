@@ -65,7 +65,9 @@ const lpPage = `<!doctype html><title>着陆页</title><main><table id=t></table
   var KEY = location.pathname === "/lp429" ? "throttle" : "github.io";
   function load() { var x = new XMLHttpRequest(); x.open("GET", "/api/websiteOrganicLandingPagesV2?key=" + KEY + "&from=2026%7C09%7C04&to=2026%7C10%7C01&isWindow=true&latest=28d&page=" + page);
     x.onload = function () { document.getElementById("n").value = page; }; x.send(); }
-  document.querySelector(".nx").addEventListener("click", function () { if (page < 3) { page++; load(); } });
+  // /lpflaky：第一次点「下一页」没反应（实测有时那一下没点上），插件要再点一次
+  var flaky = location.pathname === "/lpflaky";
+  document.querySelector(".nx").addEventListener("click", function () { if (flaky) { flaky = false; return; } if (page < 3) { page++; load(); } });
   setTimeout(load, 300);
 </script>`;
 function handle(req, res) {
@@ -104,7 +106,7 @@ function handle(req, res) {
       return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map((i) => ({ Url: "s" + p + i + ".github.io/x", Clicks: 100 * p + i,
         PrevClicks: 0, ClicksChange: 1, ClicksShare: 0.001, KeywordsCount: 3, TopKeyword: "kw" + p + i, ChangeState: "New", Trend: { "2026-09-25": 5 } })) }));
     }
-    if (u.pathname === "/lp" || u.pathname === "/lp429") return send(200, "text/html; charset=utf-8", lpPage);
+    if (u.pathname === "/lp" || u.pathname === "/lp429" || u.pathname === "/lpflaky") return send(200, "text/html; charset=utf-8", lpPage);
     if (u.pathname === "/api/other") return send(200, "application/json", JSON.stringify({ other: true }));
     if (u.pathname === "/") {
       res.writeHead(200, { "content-type": "text/html", "set-cookie": "sw_session=" + host + "; Path=/; Secure; SameSite=Lax" });
@@ -226,6 +228,12 @@ async function waitReport(rid, ms = 40000) {
     check("sw_landing：按「out of」后面的箭头往后翻，交回整理好的行（没有原始数据）", r6 && r6.ok && (d6.rows || []).length === 4 && d6.total === 350121 && !d6.items && !d6.seen
       && d6.rows[3].url === "s22.github.io/x" && d6.rows[0].topKeyword === "kw11" && d6.period.latest === "28d", r6 && (r6.error || JSON.stringify(d6).slice(0, 200)));
     check("翻到要升级才看得到的那一页：停止翻页，这一页整页丢掉，说清楚原因", r6 && /第 3 页起数据不完整（2\/2 行要升级才看得到）/.test(d6.pagerEnd) && !d6.rows.some((r) => /\*/.test(r.url)), d6.pagerEnd);
+
+    // ③c2 第一次点「下一页」没反应：多等一会儿、再点一次，照样翻下去
+    queue.push({ requestId: id("9"), kind: "capture", site: "similarweb", path: "/lpflaky", extract: "sw_landing", quietMs: 1500, minMs: 0, pager: { near: "out of", times: 10, waitMs: 1200 } });
+    await sw.evaluate(() => agentPoll(true));
+    const r9 = await waitReport(id("9"), 120000);
+    check("点了下一页没反应：再等等、再点一次，照样翻到第 2 页", r9 && r9.ok && (r9.data.rows || []).length === 4 && reports.some((x) => x.requestId === id("9") && /再点一次下一页/.test(x.note || "")), r9 && (r9.error || (r9.data.rows || []).length));
 
     // ③d 在 new.web.cafe 被撤销：插件下一次报进度时听说了，停下、关掉标签页
     cancelIds.add(id("7"));
