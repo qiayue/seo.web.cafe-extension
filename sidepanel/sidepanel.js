@@ -344,7 +344,9 @@
   // ---------- 插件正在做的事：后台的任务日志（storage.session.activity），进行中的在前、秒数实时走 ----------
   // Agent 让插件取数时用户能看见它确实在干活、到了哪一步；取不到也写明原因，不用对着「正在查询」干着急
   var activity = [];
-  function ago(ms) { var s2 = Math.max(0, Math.round(ms / 1000)); return s2 < 60 ? s2 + " 秒" : Math.floor(s2 / 60) + " 分 " + (s2 % 60) + " 秒"; }
+  // 时长（毫秒 → 「N 分 N 秒」）。⚠️ 别叫 ago：同一个闭包下面远程任务那块还有个 ago(时间戳)，函数声明会提升、后一个覆盖前一个，
+  // 这里拿时长去算「多久之前」就成了「用了 497714 小时前」（1970 年到现在）
+  function took(ms) { var s2 = Math.max(0, Math.round(ms / 1000)); return s2 < 60 ? s2 + " 秒" : Math.floor(s2 / 60) + " 分 " + (s2 % 60) + " 秒"; }
   function renderActivity() {
     var list = $("actList");
     while (list.firstChild) list.removeChild(list.firstChild);
@@ -358,8 +360,8 @@
       what.appendChild(el("span", "meta", [a.range, a.geo || "全球", "来自" + (a.from || "?")].filter(Boolean).join(" · ")));
       li.appendChild(what);
       var step = a.endedAt
-        ? (a.ok ? (a.text || "取到了") : "没取到：" + (a.error || "原因不明")) + "（用了 " + ago(a.endedAt - a.startedAt) + "）"
-        : (a.text || "处理中…") + "（已经 " + ago(Date.now() - a.startedAt) + "）";
+        ? (a.ok ? (a.text || "取到了") : "没取到：" + (a.error || "原因不明")) + "（用了 " + took(a.endedAt - a.startedAt) + "）"
+        : (a.text || "处理中…") + "（已经 " + took(Date.now() - a.startedAt) + "）";
       li.appendChild(el("div", "step", step));
       list.appendChild(li);
     });
