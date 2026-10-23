@@ -5,7 +5,7 @@
 // 等同页的 content/capture-bridge.js 问过后台「这是不是插件为远程任务开的标签页」：是才交出去，不是（你自己在逛）就全部扔掉、不再抄。
 (function () {
   "use strict";
-  var MAX_BODY = 3000000, MAX_BUFFER = 300;
+  var MAX_BODY = 6000000, MAX_BUFFER = 300;
   var state = null, buffer = []; // state：null 还没回话 / true 交出去 / false 不是任务标签页
   function emit(d) {
     if (state === false) return;

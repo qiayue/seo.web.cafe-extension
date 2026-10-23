@@ -36,6 +36,7 @@ function makeCert(dir) {
 const TOKEN = "wcx_" + "c".repeat(48);
 const queue = [];          // 等插件来领的任务
 const reports = [];        // 插件交上来的进度 / 结果
+const referralReports = []; // 可选的本地跨仓库测试证据：只有合成任务结果，不含令牌或请求头
 let authFail = false;
 let admin = false;         // 配对令牌对应的账号此刻是不是管理员
 const cancelIds = new Set(); // 这些任务在服务器上「已撤销」：报进度回 cancelled
@@ -70,6 +71,15 @@ const lpPage = `<!doctype html><title>着陆页</title><main><table id=t></table
   document.querySelector(".nx").addEventListener("click", function () { if (flaky) { flaky = false; return; } if (page < 3) { page++; load(); } });
   setTimeout(load, 300);
 </script>`;
+// 假的 Similarweb「引荐流量」：页面一打开同时请求导入表和导出表（接口形状照线上），任务只要导出的那张
+const refPage = `<!doctype html><title>引荐流量</title><main>referrals</main><script>
+  function get(u) { var x = new XMLHttpRequest(); x.open("GET", u); x.send(); }
+  setTimeout(function () {
+    get("/api/websiteanalysis/GetTrafficSourcesTotalReferralsTable?key=checkout.stripe.com&country=999&from=2026%7C08%7C01&to=2026%7C08%7C31&isWindow=false");
+    get("/api/websiteanalysis/GetOutgoingTable?country=999&from=2026%7C08%7C01&isWWW=false&isWindow=false&key=checkout.stripe.com&to=2026%7C08%7C31");
+  }, 300);
+</script>`;
+const refRec = (d, kids) => ({ Domain: d, Share: 0.05, TotalVisits: 1000, Change: 0.1, NewChange: false, Rank: 100, Category: "Tech", TotalSharePerMonth: [], ...(kids ? { Children: kids } : {}) });
 function handle(req, res) {
   const host = String(req.headers.host || "").split(":")[0];
   const u = new URL(req.url, "https://" + host);
@@ -106,6 +116,11 @@ function handle(req, res) {
       return send(200, "application/json; charset=utf-8", JSON.stringify({ TotalCount: 350121, Data: [1, 2].map((i) => ({ Url: "s" + p + i + ".github.io/x", Clicks: 100 * p + i,
         PrevClicks: 0, ClicksChange: 1, ClicksShare: 0.001, KeywordsCount: 3, TopKeyword: "kw" + p + i, ChangeState: "New", Trend: { "2026-09-25": 5 } })) }));
     }
+    if (u.pathname === "/api/websiteanalysis/GetTrafficSourcesTotalReferralsTable") return send(200, "application/json", JSON.stringify({ TotalCount: 2, TotalVisits: 9, Categories: { x: [] }, Records: u.searchParams.has("empty") ? [] : [refRec("in-a.com"), refRec("in-b.com")] }));
+    if (u.pathname === "/api/websiteanalysis/GetOutgoingTable") return send(200, "application/json", JSON.stringify({ TotalCount: 3, TotalVisits: 99, Topics: [{ Name: "t" }],
+      Records: [refRec("link.com", [refRec("checkout.link.com"), refRec("link.com")]), refRec("higgsfield.ai"), refRec("suno.com")] }));
+    if (u.pathname === "/ref") return send(200, "text/html; charset=utf-8", refPage);
+    if (u.pathname === "/refempty") return send(200, "text/html; charset=utf-8", refPage.replaceAll("?", "?empty=1&"));
     if (u.pathname === "/lp" || u.pathname === "/lp429" || u.pathname === "/lpflaky") return send(200, "text/html; charset=utf-8", lpPage);
     if (u.pathname === "/api/other") return send(200, "application/json", JSON.stringify({ other: true }));
     if (u.pathname === "/") {
@@ -230,10 +245,40 @@ async function waitReport(rid, ms = 40000) {
     check("翻到要升级才看得到的那一页：停止翻页，这一页整页丢掉，说清楚原因", r6 && /第 3 页起数据不完整（2\/2 行要升级才看得到）/.test(d6.pagerEnd) && !d6.rows.some((r) => /\*/.test(r.url)), d6.pagerEnd);
 
     // ③c2 第一次点「下一页」没反应：多等一会儿、再点一次，照样翻下去
-    queue.push({ requestId: id("9"), kind: "capture", site: "similarweb", path: "/lpflaky", extract: "sw_landing", quietMs: 1500, minMs: 0, pager: { near: "out of", times: 10, waitMs: 1200 } });
+    // 保证随机抖动后的翻页等待也超过 quietMs；第一次点击被故意忽略时没有新请求再次唤醒检查。
+    queue.push({ requestId: id("9"), kind: "capture", site: "similarweb", path: "/lpflaky", extract: "sw_landing", quietMs: 1500, minMs: 0, pager: { near: "out of", times: 10, waitMs: 2000 } });
     await sw.evaluate(() => agentPoll(true));
     const r9 = await waitReport(id("9"), 120000);
     check("点了下一页没反应：再等等、再点一次，照样翻到第 2 页", r9 && r9.ok && (r9.data.rows || []).length === 4 && reports.some((x) => x.requestId === id("9") && /再点一次下一页/.test(x.note || "")), r9 && (r9.error || (r9.data.rows || []).length));
+
+    // ③c3 收款渠道的导出流量：页面同时请求导入、导出两张表，match 只挑导出的；一次就全回来，不翻页
+    queue.push({ requestId: id("a"), kind: "capture", site: "similarweb", path: "/ref", extract: "sw_referrals", match: "GetOutgoingTable", quietMs: 1500, minMs: 0 });
+    await sw.evaluate(() => agentPoll(true));
+    const ra = await waitReport(id("a"), 60000);
+    const da = (ra && ra.data) || {};
+    referralReports.push(ra);
+    check("sw_referrals：只交导出表整理好的行（子域名在 children），不带分类 / 话题 / 原始数据", ra && ra.ok && da.direction === "out" && (da.rows || []).map((r) => r.domain).join() === "link.com,higgsfield.ai,suno.com"
+      && da.rows[0].children.length === 2 && da.total === 3 && da.period.from === "2026|08|01" && !da.items && !/Topics|in-a\.com/.test(JSON.stringify(da)), ra && (ra.error || JSON.stringify(da).slice(0, 200)));
+
+    queue.push({ requestId: id("b"), kind: "capture", site: "similarweb", path: "/ref", extract: "sw_referrals", match: "GetTrafficSourcesTotalReferralsTable", quietMs: 1500, minMs: 0 });
+    await sw.evaluate(() => agentPoll(true));
+    const rb = await waitReport(id("b"));
+    referralReports.push(rb);
+    check("sw_referrals 导入：只收来源表，时段与目标域名保留，不混入导出表", rb && rb.ok && rb.data.direction === "in"
+      && rb.data.rows.map((r) => r.domain).join() === "in-a.com,in-b.com" && rb.data.period.key === "checkout.stripe.com"
+      && rb.data.period.to === "2026|08|31" && !JSON.stringify(rb.data).includes("higgsfield.ai"));
+
+    queue.push({ requestId: id("c"), kind: "capture", site: "similarweb", path: "/refempty", extract: "sw_referrals", match: "GetTrafficSourcesTotalReferralsTable", quietMs: 1500, minMs: 0 });
+    await sw.evaluate(() => agentPoll(true));
+    const rc = await waitReport(id("c"));
+    check("sw_referrals 零行：交回失败与原因，不伪装成成功数据", rc && !rc.ok && /整理出 0 行/.test(rc.error) && rc.data === null);
+    // 失败会把页面留给用户看；测试关掉自己的标签页再继续。
+    for (const p of swTabs()) await p.close();
+
+    queue.push({ requestId: id("d"), kind: "capture", site: "similarweb", path: "/ref", extract: "missing_referrals_parser", quietMs: 1500, minMs: 0 });
+    await sw.evaluate(() => agentPoll(true));
+    const rd = await waitReport(id("d"));
+    check("缺少解析器（旧插件路径）：不打开页面，任务明确交回失败", rd && !rd.ok && /不认识这个解析器/.test(rd.error) && swTabs().length === 0);
 
     // ③d 在 new.web.cafe 被撤销：插件下一次报进度时听说了，停下、关掉标签页
     cancelIds.add(id("7"));
@@ -303,5 +348,6 @@ async function waitReport(rid, ms = 40000) {
     server.close();
   }
   console.log(failed ? "\n" + failed + " 项未通过" : "\n全部通过 ✓");
+  if (process.env.STRIPE_E2E_REPORT) fs.writeFileSync(process.env.STRIPE_E2E_REPORT, JSON.stringify({ failures: failed, reports: referralReports }, null, 2));
   process.exit(failed ? 1 : 0);
 })();
