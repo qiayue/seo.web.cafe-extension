@@ -285,6 +285,8 @@ function finish(tabId, result, reveal, cancelled) {
     return loadJobs().then(function (jobs) {
       var job = jobs[tabId];
       if (!job) return;
+      // 收尾期间可能又收到超限的一页；在串行删除任务之前以最新存储状态判失败。
+      if (job.kind === "capture" && job.captureError) result = { ok: false, error: job.captureError };
       delete jobs[tabId];
       return saveJobs(jobs).then(function () {
         var at = function (x) { return x ? x - job.startedAt : null; };
@@ -538,7 +540,7 @@ function onCaptureItem(tabId, msg) {
           var parsed = null;
           try { parsed = ex.page(body, url); } catch (e) {}
           var size = parsed ? JSON.stringify(parsed.rows).length : 0;
-          if (parsed && job.bytes + size > G.MAX_TOTAL) { stop = "数据量到上限（已整理 " + job.items.length + " 页），停止翻页"; job.pagerEnd = stop; }
+          if (parsed && job.bytes + size > G.MAX_TOTAL) { stop = "数据量到上限（已整理 " + job.items.length + " 页），停止翻页"; job.pagerEnd = stop; job.captureError = stop; }
           else if (parsed) {
             first = !job.items.length;
             job.noData = 0;
@@ -653,12 +655,14 @@ function finishCapture(tabId, timedOut) {
   return loadJobs().then(function (jobs) {
     var job = jobs[tabId];
     if (!job) return;
+    // 体积保护提前结束不能把前几页当作成功报告回传，持久化后再次收尾也一样。
+    if (job.captureError) return finish(tabId, { ok: false, error: job.captureError });
     if (job.loginSeen && !job.items.length) return finish(tabId, { ok: false, error: "要先登录（这个浏览器里没登录 " + new URL(job.url).host + "，或登录过期了）——已把那个标签页切到前台" }, true);
     return chrome.tabs.get(tabId).then(function (t) { return t; }, function () { return null; }).then(function (t) {
       if (!job.items.length && !job.seen.length) {
         return finish(tabId, { ok: false, error: (timedOut ? "到点了，" : "") + "页面没请求任何数据（可能没加载出来、要登录，或网站改了版）——已把那个标签页切到前台" }, true);
       }
-      var head = { kind: "capture", url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
+      var head = { kind: "capture", captured_at: new Date().toISOString(), url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
         pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut };
       if (job.extract) {
         // 带解析器：只交整理好的行（不带原始数据、不带接口清单）；一行都没整理出来才算失败
