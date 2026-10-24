@@ -7,7 +7,7 @@
   var mine = null, buffered = [];
   function tell(msg) { try { chrome.runtime.sendMessage(msg, function () { void chrome.runtime.lastError; }); } catch (e) { /* 插件刚更新过：旧脚本已失效 */ } }
   function forward(d) { tell({ type: "capture:item", url: d.url, status: d.status, ct: d.ct, size: d.size, body: typeof d.body === "string" ? d.body : null,
-    via: d.via, method: d.method, reqHeaders: d.reqHeaders }); }
+    via: d.via, method: d.method, reqHeaders: d.reqHeaders, captureError: typeof d.captureError === "string" ? d.captureError.slice(0, 200) : undefined }); }
   window.addEventListener("message", function (e) {
     if (e.source !== window || e.origin !== location.origin) return;
     var d = e.data;

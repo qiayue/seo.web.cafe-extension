@@ -522,6 +522,12 @@ function onCaptureItem(tabId, msg) {
       var body = typeof msg.body === "string" ? msg.body : "";
       var want = !!body && (!job.match || new RegExp(job.match).test(url));
       var first = false, stop = "";
+      // A matching response discarded by the hook must not look like the end of pagination.
+      if (msg.captureError && (!job.match || new RegExp(job.match).test(url))) {
+        stop = "数据量到上限（原始响应正文过大），停止采集";
+        job.captureError = stop;
+        job.pagerEnd = stop;
+      }
       // 要的那个接口回了 403 / 429：多半是被限流、被拦了。马上停下这张（不硬撞），交回失败，之后歇 30 分钟再领（agentDone）
       var st = Number(msg.status) || 0;
       if ((st === 403 || st === 429) && (!job.match || new RegExp(job.match).test(url)) && !job.throttled) {

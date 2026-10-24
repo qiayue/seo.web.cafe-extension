@@ -83,3 +83,48 @@ test("serialized finalization rejects a stale successful result after the job ex
   assert.equal(h.posts[0].data, null);
   assert.match(h.posts[0].error, /数据量到上限/);
 });
+
+async function hookedResponse(body, via = "xhr", url = apiUrl, ct = "application/json") {
+  const events = [];
+  let control;
+  const window = { addEventListener: (type, fn) => { control = fn; }, postMessage: data => events.push(data) };
+  function XHR() {}
+  XHR.prototype.open = function () {};
+  XHR.prototype.send = function () {};
+  XHR.prototype.setRequestHeader = function () {};
+  XHR.prototype.addEventListener = function (type, fn) { this.loaded = fn; };
+  XHR.prototype.getResponseHeader = () => ct;
+  const pending = [];
+  window.fetch = async () => ({ url, status: 200, headers: { get: () => ct }, clone: () => ({ text: () => { const p = Promise.resolve(body); pending.push(p); return p; } }) });
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../content/capture-hook.js"), "utf8"), { window, location: { origin: "https://sim.3ue.com", href: "https://sim.3ue.com/" }, URL, XMLHttpRequest: XHR });
+  control({ source: window, data: { source: "gefei-seo-capture-ctl", on: true } });
+  if (via === "xhr") {
+    const xhr = new XHR(); xhr.open("GET", url); xhr.responseType = "text"; xhr.responseText = body; xhr.responseURL = url; xhr.status = 200; xhr.send(); xhr.loaded();
+  } else { await window.fetch(url); await Promise.all(pending); await Promise.resolve(); }
+  // Run the real isolated-world bridge as well; it explicitly whitelists forwarded fields.
+  let receive, forwarded;
+  const bridgeWindow = { addEventListener: (type, fn) => { receive = fn; }, postMessage() {} };
+  const chrome = { runtime: { sendMessage: (msg, callback) => { if (msg.type === "capture:hello") callback({ job: true }); else if (msg.type === "capture:item") forwarded = msg; } } };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../content/capture-bridge.js"), "utf8"), { window: bridgeWindow, chrome, location: { origin: "https://sim.3ue.com" }, setTimeout() {} });
+  receive({ source: bridgeWindow, origin: "https://sim.3ue.com", data: events[0] });
+  assert.equal(forwarded.type, "capture:item");
+  return forwarded;
+}
+for (const via of ["xhr", "fetch"]) test(`raw oversized ${via} response fails the whole capture without sending earlier pages`, async () => {
+  const h = harness(); await h.page(1, rows(1));
+  const body = JSON.stringify({ Records: rows(2), TopCategories: "x".repeat(6000001) });
+  const event = await hookedResponse(body, via);
+  assert.equal(event.body, null); assert.ok(event.size > 6000000); assert.match(event.captureError, /数据量到上限/);
+  await h.context.onCaptureItem(7, event);
+  assert.equal(h.posts.length, 1); assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, /原始响应正文过大/);
+});
+test("hook preserves the exact size boundary and ignores unrelated or non-JSON oversize responses", async () => {
+  const boundary = await hookedResponse("x".repeat(6000000));
+  assert.equal(boundary.body.length, 6000000); assert.equal(boundary.captureError, undefined);
+  const h = harness(); await h.page(1, rows(1));
+  await h.context.onCaptureItem(7, await hookedResponse("x".repeat(6000001), "xhr", "https://sim.3ue.com/unrelated"));
+  await h.context.onCaptureItem(7, await hookedResponse("x".repeat(6000001), "xhr", apiUrl, "text/html"));
+  assert.equal(h.posts.length, 0); assert.equal(h.job().captureError, undefined);
+  await h.context.finishCapture(7, false); assert.equal(h.posts[0].ok, true); assert.equal(h.posts[0].data.rows.length, 100);
+});

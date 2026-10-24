@@ -38,7 +38,10 @@
     if (state === false) return;
     var d = { source: "gefei-seo-capture", url: String(url).slice(0, 2000), status: status, ct: String(ct || "").slice(0, 100), size: body ? body.length : 0,
       via: meta && meta.via, method: meta && meta.method, reqHeaders: meta && meta.headers };
-    if (body && /json/i.test(ct || "") && body.length <= MAX_BODY) d.body = body;
+    if (body && /json/i.test(ct || "")) {
+      if (body.length <= MAX_BODY) d.body = body;
+      else d.captureError = "数据量到上限（原始响应正文过大），停止采集";
+    }
     emit(d);
   }
 
