@@ -66,6 +66,45 @@ for (const pages of [10, 20]) test(`normal ${pages}-page capture remains success
   assert.equal(h.results[0].data.pagerEnd, "翻够了");
   assert.equal(h.posts[0].data.rows.length, pages * 100);
 });
+test("empty referral response reports source emptiness without claiming a login failure or uploading zero rows", async () => {
+  const h = harness(); await h.page(1, []); await h.context.finishCapture(7, false);
+  assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, /Records 数组为空/); assert.match(h.posts[0].error, /HTTP 200/);
+  assert.doesNotMatch(h.posts[0].error, /登录|升级/);
+});
+test("unrecognized referral rows differ from an empty source response", async () => {
+  const h = harness(); await h.page(1, [{ Share: 0.1, TotalVisits: 5 }]); await h.context.finishCapture(7, false);
+  assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, /Records 共 1 行，但没有有效网站字段/);
+});
+test("referral visits of zero remain a successful row", async () => {
+  const h = harness(); await h.page(1, [{ Domain: 'zero.example', TotalVisits: 0, Share: 0 }]); await h.context.finishCapture(7, false);
+  assert.equal(h.posts[0].ok, true); assert.equal(h.posts[0].data.rows[0].visits, 0);
+  assert.equal(Object.hasOwn(h.posts[0].data, 'sourceRows'), false);
+});
+for (const body of ['{}', '{invalid']) test(`malformed referral response fails the whole report: ${body}`, async () => {
+  const h = harness(); await h.page(1, rows(1));
+  await h.context.onCaptureItem(7, { url: apiUrl, status: 200, ct: 'application/json', body });
+  assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, /引荐报告响应/); assert.doesNotMatch(h.posts[0].error, /升级/);
+});
+for (const records of [[{ Share: 0.1, TotalVisits: 5 }], [null], [{ Domain: 'valid.example', TotalVisits: 0 }, null]]) {
+  test(`unreadable later referral page cannot upload earlier rows: ${JSON.stringify(records)}`, async () => {
+    const h = harness(); await h.page(1, rows(1)); await h.page(2, records);
+    assert.equal(h.posts.length, 1); assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+    assert.match(h.posts[0].error, /引荐报告/); assert.ok(h.posts[0].error.length < 500);
+  });
+}
+test("a genuinely empty last referral page preserves the preceding complete pages", async () => {
+  const h = harness(); await h.page(1, rows(1)); await h.page(2, []); await h.context.finishCapture(7, false);
+  assert.equal(h.posts[0].ok, true); assert.equal(h.posts[0].data.rows.length, 100);
+});
+test("persisted referral failure metadata stays bounded and does not disclose source bodies", async () => {
+  const h = harness(); await h.page(1, [{ Share: 0.1, privateSource: 'must-not-leak' }]); await h.context.finishCapture(7, false);
+  assert.ok(h.posts[0].error.length < 500); assert.doesNotMatch(JSON.stringify(h.posts[0]), /must-not-leak|privateSource|Records.*Share/);
+  const legacy = harness({ items: [{ status: 200, parsed: { rows: [], total: null } }] });
+  await legacy.context.finishCapture(7, false); assert.match(legacy.posts[0].error, /旧采集记录未保存来源行数/);
+});
 test("persisted size-limit failure cannot become success during later finalization", async () => {
   const parsed = G.EXTRACTORS.sw_referrals.page(JSON.stringify({ Records: rows(1) }), apiUrl);
   const h = harness({ captureError: "数据量到上限（已整理 1 页），停止翻页", pagerEnd: "数据量到上限（已整理 1 页），停止翻页", items: [{ url: apiUrl, page: 0, parsed }] });

@@ -540,11 +540,19 @@ function onCaptureItem(tabId, msg) {
         // 带解析器：先看这一页完不完整（要升级才看得到的列 → 停止翻页、这一页丢掉），完整的当场整理成行，原始数据不留
         var chk = ex.check ? ex.check(body) : { complete: true };
         if (chk && !chk.complete && !job.pagerEnd) {
-          stop = "第 " + (job.pagesDone + 1) + " 页起数据不完整（" + chk.locked + "/" + chk.rows + " 行要升级才看得到），已停止翻页，这一页丢掉";
+          stop = chk.error || "第 " + (job.pagesDone + 1) + " 页起数据不完整（" + chk.locked + "/" + chk.rows + " 行要升级才看得到），已停止翻页，这一页丢掉";
+          // A malformed referral response must not turn earlier pages into a successful report.
+          if (chk.error) job.captureError = stop;
           job.pagerEnd = stop;
         } else if (chk && chk.complete && !job.pagerEnd) {
           var parsed = null;
-          try { parsed = ex.page(body, url); } catch (e) {}
+          try { parsed = ex.page(body, url); } catch (e) {
+            if (job.extract === "sw_referrals") {
+              stop = "引荐报告页面解析失败，保留已有数据。";
+              job.captureError = stop;
+              job.pagerEnd = stop;
+            }
+          }
           var size = parsed ? JSON.stringify(parsed.rows).length : 0;
           if (parsed && job.bytes + size > G.MAX_TOTAL) { stop = "数据量到上限（已整理 " + job.items.length + " 页），停止翻页"; job.pagerEnd = stop; job.captureError = stop; }
           else if (parsed) {
@@ -661,7 +669,7 @@ function finishCapture(tabId, timedOut) {
   return loadJobs().then(function (jobs) {
     var job = jobs[tabId];
     if (!job) return;
-    // 体积保护提前结束不能把前几页当作成功报告回传，持久化后再次收尾也一样。
+    // 体积或响应校验提前结束不能把前几页当作成功报告回传，持久化后再次收尾也一样。
     if (job.captureError) return finish(tabId, { ok: false, error: job.captureError });
     if (job.loginSeen && !job.items.length) return finish(tabId, { ok: false, error: "要先登录（这个浏览器里没登录 " + new URL(job.url).host + "，或登录过期了）——已把那个标签页切到前台" }, true);
     return chrome.tabs.get(tabId).then(function (t) { return t; }, function () { return null; }).then(function (t) {
@@ -673,6 +681,13 @@ function finishCapture(tabId, timedOut) {
       if (job.extract) {
         // 带解析器：只交整理好的行（不带原始数据、不带接口清单）；一行都没整理出来才算失败
         var x = G.runExtract(job.extract, job.items) || { rows: [] };
+        if (!x.rows.length && job.extract === "sw_referrals" && job.items.length) {
+          var known = job.items.every(function (it) { return it.parsed && typeof it.parsed.sourceRows === "number"; });
+          var sourceRows = known ? job.items.reduce(function (n, it) { return n + it.parsed.sourceRows; }, 0) : null;
+          var statuses = Array.from(new Set(job.items.map(function (it) { return Number(it.status) || 0; }))).join("/");
+          var detail = sourceRows === 0 ? "来源 Records 数组为空" : sourceRows > 0 ? "来源 Records 共 " + sourceRows + " 行，但未解析出有效网站" : "未解析出有效网站，旧采集记录未保存来源行数";
+          return finish(tabId, { ok: false, error: "引荐报告没有可入库的网站：" + detail + "（HTTP " + statuses + "，已截取 " + job.items.length + " 页）。保留已有数据；请检查已打开的任务页面。" }, true);
+        }
         if (!x.rows.length) return finish(tabId, { ok: false, error: "页面没请求到要的数据（截到 " + job.items.length + " 段，整理出 0 行）——可能要登录、没有数据，或网站改了版；已把那个标签页切到前台" }, true);
         return finish(tabId, { ok: true, data: Object.assign(head, { extract: job.extract }, x) });
       }
