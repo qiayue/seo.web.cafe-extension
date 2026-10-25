@@ -520,7 +520,8 @@ function onCaptureItem(tabId, msg) {
       if (job.seen.length < G.MAX_SEEN) job.seen.push({ url: url, status: Number(msg.status) || 0, ct: String(msg.ct || "").slice(0, 100), size: Number(msg.size) || 0, page: job.pagesDone,
         via: msg.via === "xhr" ? "xhr" : "fetch", method: String(msg.method || "GET").slice(0, 10), reqHeaders: msg.reqHeaders && typeof msg.reqHeaders === "object" ? msg.reqHeaders : {} });
       var body = typeof msg.body === "string" ? msg.body : "";
-      var want = !!body && (!job.match || new RegExp(job.match).test(url));
+      var matches = !job.match || new RegExp(job.match).test(url);
+      var want = !!body && matches;
       var first = false, stop = "";
       // A matching response discarded by the hook must not look like the end of pagination.
       if (msg.captureError && (!job.match || new RegExp(job.match).test(url))) {
@@ -536,6 +537,12 @@ function onCaptureItem(tabId, msg) {
         job.pagerEnd = stop;
       }
       var ex = job.extract && G.EXTRACTORS[job.extract];
+      // A matching response with no readable body is not a legitimate Records:[] tail page.
+      if (matches && job.extract === "sw_referrals" && !body && !job.captureError && !job.throttled) {
+        stop = "引荐报告响应正文为空或不可读取，保留已有数据。";
+        job.captureError = stop;
+        job.pagerEnd = stop;
+      }
       if (want && ex && ex.page) {
         // 带解析器：先看这一页完不完整（要升级才看得到的列 → 停止翻页、这一页丢掉），完整的当场整理成行，原始数据不留
         var chk = ex.check ? ex.check(body) : { complete: true };

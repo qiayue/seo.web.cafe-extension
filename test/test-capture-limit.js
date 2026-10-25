@@ -123,7 +123,7 @@ test("serialized finalization rejects a stale successful result after the job ex
   assert.match(h.posts[0].error, /数据量到上限/);
 });
 
-async function hookedResponse(body, via = "xhr", url = apiUrl, ct = "application/json") {
+async function hookedResponse(body, via = "xhr", url = apiUrl, ct = "application/json", status = 200) {
   const events = [];
   let control;
   const window = { addEventListener: (type, fn) => { control = fn; }, postMessage: data => events.push(data) };
@@ -134,11 +134,11 @@ async function hookedResponse(body, via = "xhr", url = apiUrl, ct = "application
   XHR.prototype.addEventListener = function (type, fn) { this.loaded = fn; };
   XHR.prototype.getResponseHeader = () => ct;
   const pending = [];
-  window.fetch = async () => ({ url, status: 200, headers: { get: () => ct }, clone: () => ({ text: () => { const p = Promise.resolve(body); pending.push(p); return p; } }) });
+  window.fetch = async () => ({ url, status, headers: { get: () => ct }, clone: () => ({ text: () => { const p = Promise.resolve(body); pending.push(p); return p; } }) });
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../content/capture-hook.js"), "utf8"), { window, location: { origin: "https://sim.3ue.com", href: "https://sim.3ue.com/" }, URL, XMLHttpRequest: XHR });
   control({ source: window, data: { source: "gefei-seo-capture-ctl", on: true } });
   if (via === "xhr") {
-    const xhr = new XHR(); xhr.open("GET", url); xhr.responseType = "text"; xhr.responseText = body; xhr.responseURL = url; xhr.status = 200; xhr.send(); xhr.loaded();
+    const xhr = new XHR(); xhr.open("GET", url); xhr.responseType = "text"; xhr.responseText = body; xhr.responseURL = url; xhr.status = status; xhr.send(); xhr.loaded();
   } else { await window.fetch(url); await Promise.all(pending); await Promise.resolve(); }
   // Run the real isolated-world bridge as well; it explicitly whitelists forwarded fields.
   let receive, forwarded;
@@ -158,12 +158,47 @@ for (const via of ["xhr", "fetch"]) test(`raw oversized ${via} response fails th
   assert.equal(h.posts.length, 1); assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
   assert.match(h.posts[0].error, /原始响应正文过大/);
 });
-test("hook preserves the exact size boundary and ignores unrelated or non-JSON oversize responses", async () => {
+test("hook preserves the exact size boundary and ignores unrelated oversize responses", async () => {
   const boundary = await hookedResponse("x".repeat(6000000));
   assert.equal(boundary.body.length, 6000000); assert.equal(boundary.captureError, undefined);
   const h = harness(); await h.page(1, rows(1));
   await h.context.onCaptureItem(7, await hookedResponse("x".repeat(6000001), "xhr", "https://sim.3ue.com/unrelated"));
-  await h.context.onCaptureItem(7, await hookedResponse("x".repeat(6000001), "xhr", apiUrl, "text/html"));
   assert.equal(h.posts.length, 0); assert.equal(h.job().captureError, undefined);
   await h.context.finishCapture(7, false); assert.equal(h.posts[0].ok, true); assert.equal(h.posts[0].data.rows.length, 100);
+});
+for (const via of ['xhr', 'fetch']) for (const status of [200, 500]) test(`empty ${via} HTTP ${status} response fails before normal finish can upload prior pages`, async () => {
+  const h = harness(); await h.page(1, rows(1));
+  const event = await hookedResponse('', via, apiUrl, 'application/json', status);
+  assert.equal(event.body, null);
+  await h.context.onCaptureItem(7, event);
+  assert.equal(h.posts.length, 1); assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, /正文为空或不可读取/);
+  await h.context.finishCapture(7, false);
+  assert.equal(h.posts.length, 1, 'a later normal finish must not upload stale partial rows');
+});
+test('a matching non-JSON response is unavailable data, not the end of a referral report', async () => {
+  const h = harness(); await h.page(1, rows(1));
+  await h.context.onCaptureItem(7, await hookedResponse('<html>source error</html>', 'xhr', apiUrl, 'text/html', 500));
+  assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, /正文为空或不可读取/);
+  assert.doesNotMatch(h.posts[0].error, /source error/);
+});
+test('unrelated empty responses do not discard valid zero visits or a legitimate empty tail', async () => {
+  const h = harness(); await h.page(1, [{ Domain: 'zero.example', TotalVisits: 0 }]);
+  await h.context.onCaptureItem(7, await hookedResponse('', 'xhr', 'https://sim.3ue.com/unrelated', 'application/json', 500));
+  assert.equal(h.posts.length, 0); assert.equal(h.job().captureError, undefined);
+  await h.page(2, []); await h.context.finishCapture(7, false);
+  assert.equal(h.posts[0].ok, true); assert.equal(h.posts[0].data.rows[0].visits, 0);
+});
+for (const status of [403, 429]) test(`empty HTTP ${status} keeps the existing throttling failure`, async () => {
+  const h = harness(); await h.page(1, rows(1));
+  await h.context.onCaptureItem(7, await hookedResponse('', 'xhr', apiUrl, 'application/json', status));
+  assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, new RegExp(String(status)));
+  assert.doesNotMatch(h.posts[0].error, /正文为空/);
+});
+test('empty landing-page responses retain existing task handling', async () => {
+  const h = harness({ extract: 'sw_landing' });
+  await h.context.onCaptureItem(7, await hookedResponse(''));
+  assert.equal(h.posts.length, 0); assert.equal(h.job().captureError, undefined);
 });
