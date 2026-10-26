@@ -11,7 +11,7 @@ function fixture(scenario = {}) {
       query: async () => [{id:900}],
       update: async (id,patch) => { activations.push(id); if(tabs.has(id))Object.assign(tabs.get(id),patch); },
       onCreated: { addListener(fn) { listener = fn; }, removeListener(fn) { assert.equal(listener, fn); listener = null; } },
-      create: async () => { const t = { id: next++, url: N.PORTAL, status: 'complete' }; tabs.set(t.id, t); return t; },
+      create: async () => { const t = { id: next++, url: scenario.portalUrl || N.PORTAL, status: 'complete' }; tabs.set(t.id, t); return t; },
       reload: async () => {},
       get: async id => { assert.ok(tabs.has(id)); return tabs.get(id); },
       remove: async id => { removed.push(id); tabs.delete(id); },
@@ -25,6 +25,7 @@ function fixture(scenario = {}) {
         opened.push(node);
         if (scenario.openState) return [{result:{state:scenario.openState}}];
         if (scenario.noPopup) return [{result:{state:'opened'}}];
+        if (scenario.sameTab) { tabs.get(target.tabId).url=N.BASE; return [{result:{state:'opened'}}]; }
         const t = { id: next++, openerTabId: target.tabId, url: scenario.foreign ? 'https://example.test/login' : N.BASE, status: 'complete' };
         tabs.set(t.id,t); listener(t);
         return [{result:{state:'opened'}}];
@@ -47,6 +48,14 @@ test('ready node 4 returns only its prepared tab, closes portal, removes listene
 test('explicit busy node falls back, closes failed tabs and returns healthy node',async()=>{
   const f=fixture({source:{4:'busy'}}),r=await run(f);assert.equal(r.node,1);assert.deepEqual(f.opened,[4,1]);assert.equal(f.tabs.size,1);assert.equal(f.listening,false);
 });
+test('same-tab portal navigation becomes the owned source without being closed',async()=>{
+  const f=fixture({sameTab:true}),r=await run(f);assert.equal(r.node,4);assert.equal(r.tabId,1);
+  assert.equal(f.tabs.size,1);assert.equal(f.tabs.get(1).url,N.BASE);assert.equal(f.listening,false);
+});
+test('busy same-tab source returns to the portal before selecting its fallback',async()=>{
+  const f=fixture({sameTab:true,source:{4:'busy'}}),r=await run(f);assert.equal(r.node,1);assert.equal(r.tabId,1);
+  assert.deepEqual(f.opened,[4,1]);assert.equal(f.tabs.size,1);assert.equal(f.listening,false);
+});
 test('missing node uses next configured node; all busy nodes fail and clean up',async()=>{
   const f=fixture({missing:[4]});assert.equal((await run(f)).node,1);
   const busy=fixture({source:{4:'busy',1:'busy',2:'busy',3:'busy'}});await assert.rejects(run(busy),/均不可用/);assert.equal(busy.tabs.size,0);assert.equal(busy.listening,false);
@@ -60,6 +69,13 @@ test('missing permission does not open a tab',async()=>{
 test('unexpected destination is never injected; no popup stops without fallback',async()=>{
   const f=fixture({foreign:true});await assert.rejects(run(f),/其他网站/);assert.deepEqual(f.injected,[1,1]);assert.equal(f.tabs.size,0);
   const none=fixture({noPopup:true});await assert.rejects(run(none),/未自动切换/);assert.deepEqual(none.opened,[4]);assert.equal(none.tabs.size,0);
+});
+test('portal redirect diagnostics identify the stage and origin without exposing login query data',async()=>{
+  const f=fixture({portalUrl:'https://login.example.test/path?token=synthetic-secret'});
+  await assert.rejects(run(f),e=>/3ue用户中心/.test(e.message)&&/https:\/\/login.example.test/.test(e.message)&&!e.message.includes('synthetic-secret')&&!e.message.includes('/path'));
+  assert.equal(f.injected.length,0);assert.equal(f.tabs.size,0);
+  const blank=fixture({portalUrl:'about:blank'});
+  await assert.rejects(run(blank),/当前域名：空白或非网页地址/);assert.equal(blank.injected.length,0);
 });
 for(const portal of ['blocked','login','wait'])test('portal '+portal+' stops without trying other nodes',async()=>{
   const f=fixture({portal});await assert.rejects(run(f));assert.equal(f.opened.length,0);assert.equal(f.tabs.size,0);

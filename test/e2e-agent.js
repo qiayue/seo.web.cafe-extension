@@ -95,7 +95,7 @@ function handle(req, res) {
   const host = String(req.headers.host || "").split(":")[0];
   const u = new URL(req.url, "https://" + host);
   const send = (status, type, body) => { res.writeHead(status, { "content-type": type }); res.end(body); };
-  if (host === "dash.3ue.com") return send(200,"text/html; charset=utf-8",nodePortal);
+  if (host === "dash.3ue.com") return send(200,"text/html; charset=utf-8",nodeCondition.startsWith('sameTab')?nodePortal.replace("'_blank'","'_self'"):nodePortal);
   if (host === "new.web.cafe") {
     if (u.pathname === "/api/ext-agent/jobs") {
       if (authFail || req.headers.authorization !== "Bearer " + TOKEN) return send(401, "application/json", JSON.stringify({ ok: false, code: "unpaired" }));
@@ -118,7 +118,7 @@ function handle(req, res) {
     if(u.pathname==='/node-session'){
       const node=Number(u.searchParams.get('node'));nodeOpens.push(node);
       if(nodeCondition==='blocked')return send(429,'text/html; charset=utf-8','429 Too Many Requests');
-      if(nodeCondition==='busy4'&&node===4)return send(503,'text/html; charset=utf-8','节点4繁忙，请稍后');
+      if((nodeCondition==='busy4'||nodeCondition==='sameTabBusy4')&&node===4)return send(503,'text/html; charset=utf-8','节点4繁忙，请稍后');
       res.writeHead(200,{'content-type':'text/html; charset=utf-8','set-cookie':'sw_node='+node+'; Path=/; Secure; SameSite=Lax'});
       return res.end('<div id="react-app">Web Intelligence 网站分析</div><script>history.replaceState(null,"","/");window.addEventListener("hashchange",function(){if(location.hash!=="#/node-ref")return;'+refPage.match(/<script>([\s\S]*)<\/script>/)[1]+'});</script>');
     }
@@ -175,17 +175,22 @@ async function checkNodes(context,sw,panel) {
       chrome.tabs.onCreated.addListener(t=>self.__nodeEvents.push({kind:'created',id:t.id,opener:t.openerTabId,url:t.url,pending:t.pendingUrl}));
       chrome.tabs.onUpdated.addListener((id,info,t)=>{if(t.openerTabId)self.__nodeEvents.push({kind:'updated',id,opener:t.openerTabId,url:t.url,status:t.status});});
     });
-    nodeCondition='healthy';nodeOpens=[];
+    nodeCondition='sameTab';nodeOpens=[];
     queue.push({requestId:id('e'),kind:'capture',site:'similarweb',path:'/#/node-ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
     await sw.evaluate(()=>agentPoll(true));
     const node4=await waitReport(id('e'),60000);
-    check('节点4优先：门户与会话真实执行，同文档hash导航重新捕获',node4?.ok&&node4.data.sourceNode===4&&node4.data.rows.some(r=>r.domain==='node4.test')&&node4.data.finalUrl.endsWith('/#/node-ref')&&nodeOpens.join()==='4',node4?.error);
+    check('节点4优先：门户同页跳转并保留会话，同文档hash导航重新捕获',node4?.ok&&node4.data.sourceNode===4&&node4.data.rows.some(r=>r.domain==='node4.test')&&node4.data.finalUrl.endsWith('/#/node-ref')&&nodeOpens.join()==='4',node4?.error);
     if(!node4?.ok)console.log('node preparation diagnostics',JSON.stringify({nodeOpens,events:await sw.evaluate(()=>self.__nodeEvents),pages:await Promise.all(context.pages().map(async p=>({url:p.url(),text:(await p.locator('body').innerText().catch(()=>'' )).slice(0,180)})))}));
     nodeCondition='busy4';nodeOpens=[];
     queue.push({requestId:id('f'),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
     await sw.evaluate(()=>agentPoll(true));
     const fallback=await waitReport(id('f'),60000);
     check('节点4明确繁忙才备用1：失败页已关闭，报告来自备用会话',fallback?.ok&&fallback.data.sourceNode===1&&fallback.data.rows.some(r=>r.domain==='node1.test')&&nodeOpens.join()==='4,1',fallback?.error);
+    nodeCondition='sameTabBusy4';nodeOpens=[];
+    queue.push({requestId:'15'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const sameTabFallback=await waitReport('15'.repeat(16),60000);
+    check('同页节点繁忙：回到门户重新选择备用1，复用新会话',sameTabFallback?.ok&&sameTabFallback.data.sourceNode===1&&sameTabFallback.data.rows.some(r=>r.domain==='node1.test')&&nodeOpens.join()==='4,1',sameTabFallback?.error);
     nodeCondition='healthy';nodeOpens=[];
     queue.push({requestId:'12'.repeat(16),kind:'capture',site:'similarweb',path:'/lp',extract:'sw_landing',quietMs:1500,minMs:0,pager:{near:'out of',times:10,waitMs:1500}});
     await sw.evaluate(()=>agentPoll(true));
