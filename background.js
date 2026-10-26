@@ -240,6 +240,7 @@ function openJob(msg, from, url, spec) {
           jobs[tab.id] = Object.assign({
             requestId: msg.requestId, url: url, returnTabId: returnTabId,
             sourceNode: spec.preparedNode || null,
+            preparationReloads: spec.preparationReloads || 0,
             originTabId: from.panel || from.agent ? null : from.tab.id, toPanel: !!from.panel, toAgent: !!from.agent,
             keepTab: !!(from.panel && msg.keepTab), // 调试用：取完不关，方便对照网页核对
             startedAt: Date.now(), loadedAt: null, foregroundAt: spec.preparedForegroundAt || opts.active ? Date.now() : null,
@@ -497,7 +498,8 @@ function startRemoteJob(msg, from) {
     return ready.then(function () {
       return chrome.storage.local.get(["similarwebNodeMode", "similarwebNodes"]).then(function (config) {
         if (msg.site !== "similarweb" || msg.base !== self.GefeiSimilarwebNodes.BASE || config.similarwebNodeMode !== true) return null;
-        return self.GefeiSimilarwebNodes.prepare(chrome, config, { foregroundAfterMs: FOREGROUND_AFTER_MS });
+        return self.GefeiSimilarwebNodes.prepare(chrome, config, { foregroundAfterMs: FOREGROUND_AFTER_MS,
+          onProgress: function (note) { agentReport(msg.requestId, { stage: "progress", note: note }); } });
       });
     }).then(function (nodeSession) {
       return serial(function () {
@@ -508,6 +510,7 @@ function startRemoteJob(msg, from) {
           return openJob(msg, from, msg.url, {
             noMark: true, preparedTabId: nodeSession && nodeSession.tabId, preparedNode: nodeSession && nodeSession.node,
             preparedReturnTabId: nodeSession && nodeSession.returnTabId, preparedForegroundAt: nodeSession && nodeSession.foregroundAt,
+            preparationReloads: nodeSession && nodeSession.preparationReloads,
             noForeground: !capture, // fetch 不用页面画出来，后台标签页就够；capture 要页面自己去请求，后台叫不醒时切到前台
             timeoutMs: msg.timeoutMs,
             fields: capture
@@ -702,7 +705,7 @@ function finishCapture(tabId, timedOut) {
       }
       var head = { kind: "capture", captured_at: new Date().toISOString(), url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
         pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut };
-      if (job.sourceNode) head.sourceNode = job.sourceNode;
+      if (job.sourceNode) { head.sourceNode = job.sourceNode; head.preparationReloads = job.preparationReloads || 0; }
       if (job.extract) {
         // 带解析器：只交整理好的行（不带原始数据、不带接口清单）；一行都没整理出来才算失败
         var x = G.runExtract(job.extract, job.items) || { rows: [] };

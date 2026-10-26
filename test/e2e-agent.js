@@ -36,6 +36,7 @@ function makeCert(dir) {
 const TOKEN = "wcx_" + "c".repeat(48);
 let nodeCondition = "";
 let nodeOpens = [];
+let portalLoads = 0;
 const queue = [];          // 等插件来领的任务
 const reports = [];        // 插件交上来的进度 / 结果
 const referralReports = []; // 可选的本地跨仓库测试证据：只有合成任务结果，不含令牌或请求头
@@ -95,7 +96,14 @@ function handle(req, res) {
   const host = String(req.headers.host || "").split(":")[0];
   const u = new URL(req.url, "https://" + host);
   const send = (status, type, body) => { res.writeHead(status, { "content-type": type }); res.end(body); };
-  if (host === "dash.3ue.com") return send(200,"text/html; charset=utf-8",nodeCondition.startsWith('sameTab')?nodePortal.replace("'_blank'","'_self'"):nodePortal);
+  if (host === "dash.3ue.com") {
+    if(u.pathname==='/zh-Hans/'){
+      portalLoads++;
+      if(nodeCondition==='portalStall'&&portalLoads===1)return send(200,'text/html; charset=utf-8','<main>正在加载用户中心</main>');
+      if(nodeCondition==='portalChallenge')return send(200,'text/html; charset=utf-8','<main>请完成人机验证</main>');
+    }
+    return send(200,"text/html; charset=utf-8",nodeCondition.startsWith('sameTab')?nodePortal.replace("'_blank'","'_self'"):nodePortal);
+  }
   if (host === "new.web.cafe") {
     if (u.pathname === "/api/ext-agent/jobs") {
       if (authFail || req.headers.authorization !== "Bearer " + TOKEN) return send(401, "application/json", JSON.stringify({ ok: false, code: "unpaired" }));
@@ -171,7 +179,7 @@ async function checkNodes(context,sw,panel) {
     await sw.evaluate(()=>{
       self.__nodeEvents=[];
       const prepare=self.GefeiSimilarwebNodes.prepare;
-      self.GefeiSimilarwebNodes.prepare=(api,config,options)=>prepare(api,config,{...options,polls:8,foregroundAfterMs:200});
+      self.GefeiSimilarwebNodes.prepare=(api,config,options)=>prepare(api,config,{...options,polls:8,foregroundAfterMs:200,portalReloadAfterMs:400});
       chrome.tabs.onCreated.addListener(t=>self.__nodeEvents.push({kind:'created',id:t.id,opener:t.openerTabId,url:t.url,pending:t.pendingUrl}));
       chrome.tabs.onUpdated.addListener((id,info,t)=>{if(t.openerTabId)self.__nodeEvents.push({kind:'updated',id,opener:t.openerTabId,url:t.url,status:t.status});});
     });
@@ -201,6 +209,16 @@ async function checkNodes(context,sw,panel) {
     await sw.evaluate(()=>agentPoll(true));
     const nodeFetch=await waitReport('14'.repeat(16),60000);
     check('节点模式兼容既有fetch：沿所选节点会话请求，不启用capture专用钩子',nodeFetch?.ok&&/sw_node=4/.test(nodeFetch.data.results[0].body)&&nodeOpens.join()==='4',nodeFetch?.error);
+    nodeCondition='portalStall';nodeOpens=[];portalLoads=0;
+    queue.push({requestId:'16'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const recovered=await waitReport('16'.repeat(16),60000);
+    check('用户中心空白时原页自动重载一次，同节点4完成并回传恢复次数',recovered?.ok&&recovered.data.sourceNode===4&&recovered.data.preparationReloads===1&&portalLoads===2&&nodeOpens.join()==='4',recovered?.error);
+    nodeCondition='portalChallenge';nodeOpens=[];portalLoads=0;
+    queue.push({requestId:'17'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const challenge=await waitReport('17'.repeat(16),60000);
+    check('用户中心人工验证立即停止，不重载、不切备用',challenge&&!challenge.ok&&/人工验证/.test(challenge.error)&&portalLoads===1&&nodeOpens.length===0,challenge?.error);
     nodeCondition='blocked';nodeOpens=[];
     queue.push({requestId:'13'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
     await sw.evaluate(()=>agentPoll(true));

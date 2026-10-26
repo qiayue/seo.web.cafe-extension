@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const N = require('../lib/similarweb-nodes');
 function fixture(scenario = {}) {
-  let next = 1, listener, selected, opened = [], removed = [], injected = [], activations = [];
+  let next = 1, listener, selected, reloads = 0, opened = [], removed = [], injected = [], activations = [];
   const tabs = new Map();
   const api = {
     permissions: { contains: async () => scenario.permission !== false },
@@ -12,7 +12,7 @@ function fixture(scenario = {}) {
       update: async (id,patch) => { activations.push(id); if(tabs.has(id))Object.assign(tabs.get(id),patch); },
       onCreated: { addListener(fn) { listener = fn; }, removeListener(fn) { assert.equal(listener, fn); listener = null; } },
       create: async () => { const t = { id: next++, url: scenario.portalUrl || N.PORTAL, status: 'complete' }; tabs.set(t.id, t); return t; },
-      reload: async () => {},
+      reload: async () => {reloads++},
       get: async id => { assert.ok(tabs.has(id)); return tabs.get(id); },
       remove: async id => { removed.push(id); tabs.delete(id); },
     },
@@ -21,7 +21,7 @@ function fixture(scenario = {}) {
       if (func === N.portalStep) {
         const [node,action] = args;
         if (action === 'status') return [{result:{state:'wait'}}];
-        if (action === 'select') { selected = node; return [{result:{state:scenario.portal || (scenario.missing?.includes(node)?'missing':'selected')}}]; }
+        if (action === 'select') { selected = node; return [{result:{state:scenario.portal || (scenario.portalUntilReload&&!reloads?'wait':scenario.missing?.includes(node)?'missing':'selected')}}]; }
         opened.push(node);
         if (scenario.openState) return [{result:{state:scenario.openState}}];
         if (scenario.noPopup) return [{result:{state:'opened'}}];
@@ -34,7 +34,7 @@ function fixture(scenario = {}) {
       return [{result:scenario.needsForeground ? (tabs.get(target.tabId).active ? 'ready' : 'wait') : scenario.source?.[selected] || 'ready'}];
     } },
   };
-  return {api,tabs,opened,removed,injected,activations,get listening(){return !!listener}};
+  return {api,tabs,opened,removed,injected,activations,get reloads(){return reloads},get listening(){return !!listener}};
 }
 const run = f => N.prepare(f.api,{}, {delay:async()=>{},polls:2});
 test('node preference defaults to 4; explicit order is validated and deduplicated',()=>{
@@ -77,8 +77,22 @@ test('portal redirect diagnostics identify the stage and origin without exposing
   const blank=fixture({portalUrl:'about:blank'});
   await assert.rejects(run(blank),/当前域名：空白或非网页地址/);assert.equal(blank.injected.length,0);
 });
-for(const portal of ['blocked','login','wait'])test('portal '+portal+' stops without trying other nodes',async()=>{
+for(const portal of ['blocked','login','challenge','wait'])test('portal '+portal+' stops without trying other nodes',async()=>{
   const f=fixture({portal});await assert.rejects(run(f));assert.equal(f.opened.length,0);assert.equal(f.tabs.size,0);
+});
+test('stalled owned portal is foregrounded and reloaded once, without changing nodes',async()=>{
+  const f=fixture({portalUntilReload:true});let tick=100;const progress=[];
+  const r=await N.prepare(f.api,{}, {polls:5,now:()=>tick,foregroundAfterMs:5,portalReloadAfterMs:15,delay:async()=>{tick+=10},onProgress:s=>progress.push(s)});
+  assert.equal(r.node,4);assert.equal(r.preparationReloads,1);assert.equal(f.reloads,1);assert.deepEqual(f.opened,[4]);assert.ok(progress.some(s=>/自动重载一次/.test(s)));
+});
+test('persistently blank portal exhausts its one reload without cycling nodes',async()=>{
+  const f=fixture({portal:'wait'});let tick=100;
+  await assert.rejects(N.prepare(f.api,{}, {polls:6,now:()=>tick,foregroundAfterMs:5,portalReloadAfterMs:15,delay:async()=>{tick+=10}}),/自动重载一次后仍未就绪/);
+  assert.equal(f.reloads,1);assert.deepEqual(f.opened,[]);assert.equal(f.tabs.size,0);
+});
+for(const portal of ['blocked','login','challenge'])test('portal '+portal+' never uses the reload recovery',async()=>{
+  const f=fixture({portal});await assert.rejects(N.prepare(f.api,{}, {polls:5,portalReloadAfterMs:0,foregroundAfterMs:0,delay:async()=>{}}));
+  assert.equal(f.reloads,0);
 });
 
 // Exercise the real background adapter and tab lifecycle, including re-arming
