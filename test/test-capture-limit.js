@@ -21,7 +21,7 @@ function harness(jobOverrides = {}) {
     items: [], seen: [], bytes: 0, pagesDone: 0, pagerEnd: "", ...jobOverrides } };
   const results = [], posts = [];
   const context = { URL, Date: class extends Date { constructor(...args) { super(...(args.length ? args : ["2026-10-20T08:00:00Z"])); } },
-    G, loadJobs: async () => structuredClone(jobs), saveJobs: async value => { jobs = structuredClone(value); },
+    G, self:{GefeiSimilarwebNodes:require('../lib/similarweb-nodes.js')}, loadJobs: async () => structuredClone(jobs), saveJobs: async value => { jobs = structuredClone(value); },
     serial: callback => Promise.resolve().then(callback), notify() {}, scheduleCaptureCheck() {}, setTimeout() {},
     chrome: { tabs: { get: async () => ({ url: "https://sim.3ue.com/#/referrals", title: "Synthetic report" }) },
       storage: { session: { get: async () => ({}), remove: async () => {}, set: async () => {} } } },
@@ -45,6 +45,19 @@ function rows(page, large = false) {
       TotalVisits: j, Category: "c".repeat(100),
     })) } : {}) }));
 }
+test('after a reload, stale or unidentified document messages cannot contaminate the new capture',async()=>{
+  const h=harness({ignoredDocumentId:'old-document'}),body=JSON.stringify({Records:[{Domain:'stale.test',TotalVisits:999}]});
+  await h.context.onCaptureItem(7,{url:apiUrl,status:200,ct:'application/json',body},'old-document');
+  await h.context.onCaptureItem(7,{url:apiUrl,status:200,ct:'application/json',body});
+  assert.equal(h.job().items.length,0);assert.equal(h.job().seen.length,0);
+  await h.context.onCaptureItem(7,{url:apiUrl,status:200,ct:'application/json',body:JSON.stringify({Records:[{Domain:'fresh.test',TotalVisits:1}]})},'new-document');
+  await h.context.finishCapture(7,false);assert.equal(h.results[0].data.rows[0].domain,'fresh.test');
+});
+test('a late 429 from the retired document still stops the capture without uploading rows',async()=>{
+  const h=harness({ignoredDocumentId:'old-document'});
+  await h.context.onCaptureItem(7,{url:apiUrl,status:429,ct:'application/json',body:'{}'},'old-document');
+  assert.equal(h.results[0].ok,false);assert.match(h.results[0].error,/429/);assert.equal(h.posts[0].data,null);
+});
 test("parsed data exceeding the real size limit fails without uploading partial rows", async () => {
   const h = harness();
   for (let page = 1; page <= 20 && !h.results.length; page++) await h.page(page, rows(page, true));

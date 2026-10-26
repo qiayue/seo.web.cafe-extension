@@ -39,6 +39,7 @@ var SITE_ORIGIN = "https://seo.web.cafe";
 var JOB_TIMEOUT_MS = 45000;     // 页面那边 60 秒放弃，这里先放弃、把原因说清楚
 var RELATED_GRACE_MS = 2500;    // 曲线到了之后再等一会儿相关查询；等不到就只交曲线
 var FOREGROUND_AFTER_MS = 8000; // 后台这么久还没等到曲线，就把标签页切到前台让它加载
+var INITIAL_CAPTURE_RELOAD_MS = 30000; // 给报表接口留出加载时间；仅零数据时允许一次恢复
 var AWAKE_MARK = "#gefei-seo-agent"; // 只有带这个记号的标签页，awake.js 才会让它在后台也照常加载
 var AHREFS_QUIET_MS = 4000;     // Ahrefs 页面拿到曲线和文字之后，再这么久没有新数据就算加载完了
 var PAGE_POLL_MS = 1500;        // 打开的网页加载完之后，每隔这么久读一次，正文长度两次一样就算渲染完了
@@ -255,6 +256,7 @@ function openJob(msg, from, url, spec) {
           }).catch(function () { finish(tab.id, { ok: false, error: "无法打开已选节点的报告。" }); });
           logActivity(msg.requestId, Object.assign({ from: fromLabel(from), stage: "opened", text: spec.opened }, spec.label));
           if (!spec.noForeground) setTimeout(function () { toForeground(tab.id); }, FOREGROUND_AFTER_MS);
+          if (spec.fields.kind === "capture" && spec.fields.origin === self.GefeiSimilarwebNodes.BASE) scheduleCaptureCheck(tab.id, INITIAL_CAPTURE_RELOAD_MS);
           setTimeout(function () {
             if (spec.onTimeout) return spec.onTimeout(tab.id);
             finish(tab.id, { ok: false, error: (JOB_TIMEOUT_MS / 1000) + " 秒内没取到数据（谷歌趋势页面可能没加载完，或要求人机验证）——已把那个标签页切到前台，看一眼就知道" }, true);
@@ -531,11 +533,19 @@ function startRemoteJob(msg, from) {
 }
 
 /** 页面交上来一段数据：记进「请求过哪些接口」；是 JSON、对得上 match、没超量的收下 */
-function onCaptureItem(tabId, msg) {
+function onCaptureItem(tabId, msg, documentId) {
   return serial(function () {
     return loadJobs().then(function (jobs) {
       var job = jobs[tabId];
       if (!job || job.kind !== "capture") return null;
+      // A reload may leave an old document's response queued in the worker.
+      // Chrome supplies documentId; webpage payloads cannot choose this value.
+      if (job.ignoredDocumentId && (!documentId || documentId === job.ignoredDocumentId)) {
+        // A late rate-limit response must still stop the job, even when data
+        // from that retired document is no longer eligible for collection.
+        var lateStatus = Number(msg.status) || 0;
+        if (!((lateStatus === 403 || lateStatus === 429) && (!job.match || new RegExp(job.match).test(String(msg.url || ""))))) return null;
+      }
       var url = String(msg.url || "").slice(0, 2000);
       if (job.seen.length < G.MAX_SEEN) job.seen.push({ url: url, status: Number(msg.status) || 0, ct: String(msg.ct || "").slice(0, 100), size: Number(msg.size) || 0, page: job.pagesDone,
         via: msg.via === "xhr" ? "xhr" : "fetch", method: String(msg.method || "GET").slice(0, 10), reqHeaders: msg.reqHeaders && typeof msg.reqHeaders === "object" ? msg.reqHeaders : {} });
@@ -609,6 +619,62 @@ function onCaptureItem(tabId, msg) {
 function scheduleCaptureCheck(tabId, ms) {
   setTimeout(function () { captureCheck(tabId); }, ms + 50);
 }
+/** Only a 3ue capture with zero collected pages may reload its own initial document. */
+async function recoverInitialCapture(tabId) {
+  var job = await serial(function () {
+    return loadJobs().then(function (jobs) {
+      var j = jobs[tabId];
+      if (!j || j.kind !== "capture" || j.origin !== self.GefeiSimilarwebNodes.BASE || j.items.length || j.initialLoadRetried || j.initialLoadChecking || j.captureError || j.throttled) return null;
+      j.initialLoadChecking = true;
+      return saveJobs(jobs).then(function () { return j; });
+    });
+  });
+  if (!job) return;
+  try {
+    var tab = await chrome.tabs.get(tabId);
+    if (tab.status === "loading" && new URL(tab.pendingUrl || "about:blank").origin === job.origin && new URL(tab.url || "about:blank").origin !== job.origin) {
+      await serial(function () { return loadJobs().then(function (jobs) { if (jobs[tabId]) { jobs[tabId].initialLoadChecking = false; return saveJobs(jobs); } }); });
+      scheduleCaptureCheck(tabId, job.quietMs); return;
+    }
+    if (new URL(tab.url || "about:blank").origin !== job.origin) throw new Error("unexpected capture origin");
+    var checked = await chrome.scripting.executeScript({ target: { tabId: tabId }, func: self.GefeiSimilarwebNodes.sourceState, injectImmediately: true });
+    var check = checked && checked[0] || {};
+    var outcome = await serial(function () {
+      return loadJobs().then(async function (jobs) {
+        var j = jobs[tabId];
+        if (!j) return null;
+        j.initialLoadChecking = false;
+        // Re-check after the async probe: data or cancellation may have arrived.
+        if (j.items.length || j.captureError || j.throttled) { await saveJobs(jobs); return null; }
+        var error = check.result === "blocked" ? "Similarweb疑似被限流或配额不足，停止自动重载。"
+          : check.result === "login" ? "Similarweb需要登录，停止自动重载。"
+          : check.result === "challenge" ? "Similarweb需要人工验证，停止自动重载。" : "";
+        j.initialLoadRetried = true;
+        if (error) { await saveJobs(jobs); return { error: error }; }
+        // Do not reload if the old document cannot be identified safely.
+        if (typeof check.documentId !== "string" || !check.documentId) { await saveJobs(jobs); return null; }
+        j.ignoredDocumentId = check.documentId;
+        j.initialLoadReloads = 1; j.loadedAt = null; j.lastAt = null;
+        await saveJobs(jobs);
+        notify(j, "retry", "Similarweb报告尚未收到数据，正在原页面自动重载一次。");
+        await chrome.tabs.reload(tabId);
+        return { reloaded: true };
+      });
+    });
+    if (outcome && outcome.error) return finish(tabId, { ok: false, error: outcome.error }, true);
+    scheduleCaptureCheck(tabId, job.quietMs);
+  } catch (e) {
+    // Stop recovery without discarding data that arrived while checking the page.
+    var failed = await serial(function () {
+      return loadJobs().then(function (jobs) {
+        var j = jobs[tabId]; if (!j) return false;
+        j.initialLoadChecking = false; j.initialLoadRetried = true;
+        return saveJobs(jobs).then(function () { return !j.items.length; });
+      });
+    });
+    if (failed) return finish(tabId, { ok: false, error: "Similarweb初始页面恢复失败，已停止本次采集；请检查来源页面。" }, true);
+  }
+}
 function captureCheck(tabId) {
   return loadJobs().then(function (jobs) {
     var job = jobs[tabId];
@@ -617,7 +683,10 @@ function captureCheck(tabId) {
     if (job.lastAt && now - job.lastAt < job.quietMs) return; // 还有数据在进来：等下一次（每段数据都会再约一次）
     if (now < (job.loadedAt || job.startedAt) + job.minMs) { scheduleCaptureCheck(tabId, (job.loadedAt || job.startedAt) + job.minMs - now); return; }
     // 一段要的数据都还没来（页面还在加载，或接口都还没打）：接着等，到点由超时收尾（那时把请求过的接口清单交回去，摸接口用）
-    if (!job.items.length) { scheduleCaptureCheck(tabId, job.quietMs); return; }
+    if (!job.items.length) {
+      if (job.origin === self.GefeiSimilarwebNodes.BASE && !job.initialLoadRetried && now - job.startedAt >= INITIAL_CAPTURE_RELOAD_MS) return recoverInitialCapture(tabId);
+      scheduleCaptureCheck(tabId, job.quietMs); return;
+    }
     // 点了「下一页」却没有新数据进来：先多等一会儿（接口慢）；还没有就再点一次（那一下可能没点上）；
     // 两次都不行才算翻到底了（或者到了账号能看的上限，比如官方账号只给前 100 条），别一直点下去。
     // 实测只等一次的话，pages.dev 4 月翻到第 2 页就停了（199 行）、vercel.app 4 月重抓两次都停在 897 行
@@ -706,6 +775,7 @@ function finishCapture(tabId, timedOut) {
       var head = { kind: "capture", captured_at: new Date().toISOString(), url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
         pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut };
       if (job.sourceNode) { head.sourceNode = job.sourceNode; head.preparationReloads = job.preparationReloads || 0; }
+      if (job.origin === self.GefeiSimilarwebNodes.BASE) head.initialLoadReloads = job.initialLoadReloads || 0;
       if (job.extract) {
         // 带解析器：只交整理好的行（不带原始数据、不带接口清单）；一行都没整理出来才算失败
         var x = G.runExtract(job.extract, job.items) || { rows: [] };
@@ -943,7 +1013,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return true; // 异步回话
   }
   if (msg.type === "trends:captured" && sender.tab) { onCaptured(sender.tab.id, msg); return false; }
-  if (msg.type === "capture:item" && sender.tab) { onCaptureItem(sender.tab.id, msg); return false; }
+  if (msg.type === "capture:item" && sender.tab) { onCaptureItem(sender.tab.id, msg, sender.documentId); return false; }
   if (msg.type === "capture:login" && sender.tab) {
     serial(function () { return loadJobs().then(function (jobs) { var j = jobs[sender.tab.id]; if (j && j.kind === "capture") { j.loginSeen = true; return saveJobs(jobs); } }); });
     return false;

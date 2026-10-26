@@ -37,6 +37,7 @@ const TOKEN = "wcx_" + "c".repeat(48);
 let nodeCondition = "";
 let nodeOpens = [];
 let portalLoads = 0;
+let reportLoads = 0;
 const queue = [];          // 等插件来领的任务
 const reports = [];        // 插件交上来的进度 / 结果
 const referralReports = []; // 可选的本地跨仓库测试证据：只有合成任务结果，不含令牌或请求头
@@ -126,6 +127,8 @@ function handle(req, res) {
     if(u.pathname==='/node-session'){
       const node=Number(u.searchParams.get('node'));nodeOpens.push(node);
       if(nodeCondition==='blocked')return send(429,'text/html; charset=utf-8','429 Too Many Requests');
+      if(nodeCondition==='sourceStall'&&nodeOpens.length===1)return send(200,'text/html; charset=utf-8','<main>正在加载Similarweb</main>');
+      if(nodeCondition==='sourceChallenge')return send(200,'text/html; charset=utf-8','<main>请完成人机验证</main>');
       if((nodeCondition==='busy4'||nodeCondition==='sameTabBusy4')&&node===4)return send(503,'text/html; charset=utf-8','节点4繁忙，请稍后');
       res.writeHead(200,{'content-type':'text/html; charset=utf-8','set-cookie':'sw_node='+node+'; Path=/; Secure; SameSite=Lax'});
       return res.end('<div id="react-app">Web Intelligence 网站分析</div><script>history.replaceState(null,"","/");window.addEventListener("hashchange",function(){if(location.hash!=="#/node-ref")return;'+refPage.match(/<script>([\s\S]*)<\/script>/)[1]+'});</script>');
@@ -147,6 +150,14 @@ function handle(req, res) {
     if (u.pathname === "/api/websiteanalysis/GetOutgoingTable") return send(200, "application/json", JSON.stringify({ TotalCount: 3, TotalVisits: 99, Topics: [{ Name: "t" }],
       Records: [...(nodeCondition ? [refRec("node"+(/sw_node=(\d+)/.exec(req.headers.cookie||"")||[])[1]+".test")] : []), refRec("link.com", [refRec("checkout.link.com"), refRec("link.com")]), refRec("higgsfield.ai"), refRec("suno.com")] }));
     if (u.pathname === "/ref") return send(200, "text/html; charset=utf-8", refPage);
+    if(u.pathname==='/refstall'){
+      reportLoads++;
+      return send(200,'text/html; charset=utf-8',reportLoads===1?'<div id="react-app">Web Intelligence 网站分析</div>':refPage);
+    }
+    if(u.pathname==='/refchallenge'){
+      reportLoads++;
+      return send(200,'text/html; charset=utf-8','<main>请完成人机验证</main>');
+    }
     if (u.pathname === "/refempty") return send(200, "text/html; charset=utf-8", refPage.replaceAll("?", "?empty=1&"));
     if (u.pathname === "/lp" || u.pathname === "/lp429" || u.pathname === "/lpflaky") return send(200, "text/html; charset=utf-8", lpPage);
     if (u.pathname === "/api/other") return send(200, "application/json", JSON.stringify({ other: true }));
@@ -179,7 +190,8 @@ async function checkNodes(context,sw,panel) {
     await sw.evaluate(()=>{
       self.__nodeEvents=[];
       const prepare=self.GefeiSimilarwebNodes.prepare;
-      self.GefeiSimilarwebNodes.prepare=(api,config,options)=>prepare(api,config,{...options,polls:8,foregroundAfterMs:200,portalReloadAfterMs:400});
+      self.GefeiSimilarwebNodes.prepare=(api,config,options)=>prepare(api,config,{...options,polls:12,foregroundAfterMs:200,portalReloadAfterMs:3000});
+      INITIAL_CAPTURE_RELOAD_MS=500;
       chrome.tabs.onCreated.addListener(t=>self.__nodeEvents.push({kind:'created',id:t.id,opener:t.openerTabId,url:t.url,pending:t.pendingUrl}));
       chrome.tabs.onUpdated.addListener((id,info,t)=>{if(t.openerTabId)self.__nodeEvents.push({kind:'updated',id,opener:t.openerTabId,url:t.url,status:t.status});});
     });
@@ -187,7 +199,7 @@ async function checkNodes(context,sw,panel) {
     queue.push({requestId:id('e'),kind:'capture',site:'similarweb',path:'/#/node-ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
     await sw.evaluate(()=>agentPoll(true));
     const node4=await waitReport(id('e'),60000);
-    check('节点4优先：门户同页跳转并保留会话，同文档hash导航重新捕获',node4?.ok&&node4.data.sourceNode===4&&node4.data.rows.some(r=>r.domain==='node4.test')&&node4.data.finalUrl.endsWith('/#/node-ref')&&nodeOpens.join()==='4',node4?.error);
+    check('节点4优先：门户同页跳转并保留会话，同文档hash导航重新捕获',node4?.ok&&node4.data.sourceNode===4&&node4.data.preparationReloads===0&&node4.data.rows.some(r=>r.domain==='node4.test')&&node4.data.finalUrl.endsWith('/#/node-ref')&&nodeOpens.join()==='4',node4?.error);
     if(!node4?.ok)console.log('node preparation diagnostics',JSON.stringify({nodeOpens,events:await sw.evaluate(()=>self.__nodeEvents),pages:await Promise.all(context.pages().map(async p=>({url:p.url(),text:(await p.locator('body').innerText().catch(()=>'' )).slice(0,180)})))}));
     nodeCondition='busy4';nodeOpens=[];
     queue.push({requestId:id('f'),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
@@ -219,6 +231,26 @@ async function checkNodes(context,sw,panel) {
     await sw.evaluate(()=>agentPoll(true));
     const challenge=await waitReport('17'.repeat(16),60000);
     check('用户中心人工验证立即停止，不重载、不切备用',challenge&&!challenge.ok&&/人工验证/.test(challenge.error)&&portalLoads===1&&nodeOpens.length===0,challenge?.error);
+    nodeCondition='sourceStall';nodeOpens=[];
+    queue.push({requestId:'18'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const sourceRecovered=await waitReport('18'.repeat(16),60000);
+    check('Similarweb准备页空白：同节点原页重载一次后正常捕获',sourceRecovered?.ok&&sourceRecovered.data.sourceNode===4&&sourceRecovered.data.preparationReloads===1&&nodeOpens.join()==='4,4',JSON.stringify({ok:sourceRecovered?.ok,error:sourceRecovered?.error,reloads:sourceRecovered?.data?.preparationReloads,node:sourceRecovered?.data?.sourceNode,opens:nodeOpens}));
+    nodeCondition='sourceChallenge';nodeOpens=[];
+    queue.push({requestId:'19'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const sourceChallenge=await waitReport('19'.repeat(16),60000);
+    check('Similarweb准备页人工验证停止，无重载或备用',sourceChallenge&&!sourceChallenge.ok&&/人工验证/.test(sourceChallenge.error)&&nodeOpens.join()==='4',sourceChallenge?.error);
+    nodeCondition='reportStall';nodeOpens=[];reportLoads=0;
+    queue.push({requestId:'20'.repeat(16),kind:'capture',site:'similarweb',path:'/refstall',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const reportRecovered=await waitReport('20'.repeat(16),60000);
+    check('报告初始空白：零数据时重载一次，新文档响应正常入选',reportRecovered?.ok&&reportRecovered.data.initialLoadReloads===1&&reportRecovered.data.rows.some(r=>r.domain==='node4.test')&&reportLoads===2,reportRecovered?.error);
+    nodeCondition='reportChallenge';nodeOpens=[];reportLoads=0;
+    queue.push({requestId:'21'.repeat(16),kind:'capture',site:'similarweb',path:'/refchallenge',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const reportChallenge=await waitReport('21'.repeat(16),60000);
+    check('报告初始人工验证停止，不整页重试',reportChallenge&&!reportChallenge.ok&&/人工验证/.test(reportChallenge.error)&&reportLoads===1,reportChallenge?.error);
     nodeCondition='blocked';nodeOpens=[];
     queue.push({requestId:'13'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
     await sw.evaluate(()=>agentPoll(true));

@@ -2,6 +2,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const N = require('../lib/similarweb-nodes');
+test('verification text in report keywords is data, while an actual gate still stops',()=>{
+  const saved=global.document;
+  try{
+    const alert={innerText:'请完成人机验证',getClientRects:()=>[{}]};let showAlert=false;
+    global.document={body:{innerText:'Web Intelligence 网站分析 热搜关键词：验证码'},querySelector:s=>s==='#react-app'?{}:null,querySelectorAll:s=>s.includes('[role=')&&showAlert?[alert]:[]};
+    assert.equal(N.sourceState(),'ready');showAlert=true;assert.equal(N.sourceState(),'challenge');
+  }finally{if(saved===undefined)delete global.document;else global.document=saved;}
+});
 function fixture(scenario = {}) {
   let next = 1, listener, selected, reloads = 0, opened = [], removed = [], injected = [], activations = [];
   const tabs = new Map();
@@ -31,7 +39,7 @@ function fixture(scenario = {}) {
         return [{result:{state:'opened'}}];
       }
       assert.equal(func,N.sourceState);
-      return [{result:scenario.needsForeground ? (tabs.get(target.tabId).active ? 'ready' : 'wait') : scenario.source?.[selected] || 'ready'}];
+      return [{result:scenario.sourceUntilReload&&!reloads?'wait':scenario.needsForeground ? (tabs.get(target.tabId).active ? 'ready' : 'wait') : scenario.source?.[selected] || 'ready'}];
     } },
   };
   return {api,tabs,opened,removed,injected,activations,get reloads(){return reloads},get listening(){return !!listener}};
@@ -60,8 +68,13 @@ test('missing node uses next configured node; all busy nodes fail and clean up',
   const f=fixture({missing:[4]});assert.equal((await run(f)).node,1);
   const busy=fixture({source:{4:'busy',1:'busy',2:'busy',3:'busy'}});await assert.rejects(run(busy),/均不可用/);assert.equal(busy.tabs.size,0);assert.equal(busy.listening,false);
 });
-for(const source of ['blocked','login','wait'])test(source+' does not switch accounts or return partial success',async()=>{
+for(const source of ['blocked','login','challenge','wait'])test(source+' does not switch accounts or return partial success',async()=>{
   const f=fixture({source:{4:source}});await assert.rejects(run(f));assert.deepEqual(f.opened,[4]);assert.equal(f.tabs.size,0);assert.equal(f.listening,false);
+});
+test('stalled owned Similarweb preparation page reloads once on the same node',async()=>{
+  const f=fixture({sourceUntilReload:true});let tick=100;
+  const r=await N.prepare(f.api,{}, {polls:5,now:()=>tick,foregroundAfterMs:5,portalReloadAfterMs:15,delay:async()=>{tick+=10}});
+  assert.equal(r.node,4);assert.equal(r.preparationReloads,1);assert.equal(f.reloads,1);assert.deepEqual(f.opened,[4]);
 });
 test('missing permission does not open a tab',async()=>{
   const f=fixture({permission:false});await assert.rejects(run(f),/允许/);assert.equal(f.tabs.size,0);assert.equal(f.listening,false);
@@ -107,7 +120,7 @@ function fn(name,end) {
 }
 async function adapter(mode,base='https://sim.3ue.com',kind='capture') {
   const events=[],jobs={},Nmock={BASE:N.BASE,prepare:async()=>{events.push('prepare');return{tabId:44,node:4,returnTabId:900,foregroundAt:123}}};
-  const context={URL,Date,Number,Object,Promise,setTimeout(){},AWAKE_MARK:'',JOB_TIMEOUT_MS:100,FOREGROUND_AFTER_MS:10,
+  const context={URL,Date,Number,Object,Promise,setTimeout(){},scheduleCaptureCheck(){},INITIAL_CAPTURE_RELOAD_MS:15,AWAKE_MARK:'',JOB_TIMEOUT_MS:100,FOREGROUND_AFTER_MS:10,
     self:{GefeiSimilarwebNodes:Nmock},serial:async cb=>cb(),loadJobs:async()=>jobs,saveJobs:async()=>{events.push('save')},
     logActivity(){},fromLabel(){return'cloud'},ensureCaptureScripts:async()=>{events.push('scripts')},waitForAllow:async()=>{throw Error('unexpected permission prompt')},
     chrome:{permissions:{contains:async()=>true},storage:{local:{get:async()=>({similarwebNodeMode:mode})}},
