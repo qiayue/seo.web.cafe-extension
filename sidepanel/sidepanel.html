@@ -76,6 +76,13 @@
     <label for="similarwebBase">Similarweb 地址（用共享账号就填它的域名，比如 https://sim.3ue.com；不填 = 官方）</label>
     <input id="similarwebBase" type="text" placeholder="https://pro.similarweb.com" spellcheck="false" autocomplete="off">
     <button type="button" class="small" id="saveSimilarweb">保存</button> <span id="similarwebSaved" class="hint"></span>
+    <div id="similarwebNodeBox" hidden>
+      <label class="check"><input type="checkbox" id="similarwebNodeMode"> 采集前选择3ue节点</label>
+      <label for="similarwebNodes">节点顺序（首个为优先节点，其余为备用节点）</label>
+      <input id="similarwebNodes" type="text" value="4,1,2,3" autocomplete="off">
+      <button type="button" class="small" id="saveSimilarwebNodes">保存节点设置</button>
+      <p class="hint" id="similarwebNodeState">仅节点明确繁忙或不可用时切换备用节点；限流、登录或验证异常时停止。</p>
+    </div>
     <p class="hint" id="similarwebPerm"></p>
     <button type="button" class="small" id="similarwebAllow" hidden>允许读 Similarweb 数据</button>
   </section>
@@ -97,6 +104,7 @@
   <script src="../lib/trends-parse.js"></script>
   <script src="../lib/ahrefs-parse.js"></script>
   <script src="../lib/agent-jobs.js"></script>
+  <script src="../lib/similarweb-nodes.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

@@ -34,6 +34,8 @@ function makeCert(dir) {
 }
 
 const TOKEN = "wcx_" + "c".repeat(48);
+let nodeCondition = "";
+let nodeOpens = [];
 const queue = [];          // 等插件来领的任务
 const reports = [];        // 插件交上来的进度 / 结果
 const referralReports = []; // 可选的本地跨仓库测试证据：只有合成任务结果，不含令牌或请求头
@@ -80,10 +82,20 @@ const refPage = `<!doctype html><title>引荐流量</title><main>referrals</main
   }, 300);
 </script>`;
 const refRec = (d, kids) => ({ Domain: d, Share: 0.05, TotalVisits: 1000, Change: 0.1, NewChange: false, Rank: 100, Category: "Tech", TotalSharePerMonth: [], ...(kids ? { Children: kids } : {}) });
+// Portal structure is the observed 3ue card/select shape; all traffic remains local.
+const nodePortal = `<!doctype html><meta charset="utf-8"><nb-card><div class="logo" style="background-image:url(assets/svg/similarweb.svg)"></div><nb-select placeholder="未选择节点"><button id="pick">节点1 倍率 X 1 PRO 全球版</button></nb-select><button id="open">打开</button></nb-card><script>
+  let selected=1;
+  document.getElementById('pick').onclick=()=>{
+    if(document.querySelector('nb-option'))return;
+    for(const n of [1,2,3,4]){const o=document.createElement('nb-option');o.textContent='节点'+n+' 倍率 X 1 PRO 全球版';o.onclick=()=>{selected=n;document.getElementById('pick').textContent=o.textContent;document.querySelectorAll('nb-option').forEach(e=>e.remove());};document.body.append(o);}
+  };
+  document.getElementById('open').onclick=()=>window.open('https://sim.3ue.com/node-session?node='+selected,'_blank');
+</script>`;
 function handle(req, res) {
   const host = String(req.headers.host || "").split(":")[0];
   const u = new URL(req.url, "https://" + host);
   const send = (status, type, body) => { res.writeHead(status, { "content-type": type }); res.end(body); };
+  if (host === "dash.3ue.com") return send(200,"text/html; charset=utf-8",nodePortal);
   if (host === "new.web.cafe") {
     if (u.pathname === "/api/ext-agent/jobs") {
       if (authFail || req.headers.authorization !== "Bearer " + TOKEN) return send(401, "application/json", JSON.stringify({ ok: false, code: "unpaired" }));
@@ -103,6 +115,13 @@ function handle(req, res) {
     return send(200, "text/html; charset=utf-8", pairPage);
   }
   if (host === "pro.similarweb.com" || host === "sim.3ue.com") {
+    if(u.pathname==='/node-session'){
+      const node=Number(u.searchParams.get('node'));nodeOpens.push(node);
+      if(nodeCondition==='blocked')return send(429,'text/html; charset=utf-8','429 Too Many Requests');
+      if(nodeCondition==='busy4'&&node===4)return send(503,'text/html; charset=utf-8','节点4繁忙，请稍后');
+      res.writeHead(200,{'content-type':'text/html; charset=utf-8','set-cookie':'sw_node='+node+'; Path=/; Secure; SameSite=Lax'});
+      return res.end('<div id="react-app">Web Intelligence 网站分析</div><script>history.replaceState(null,"","/");window.addEventListener("hashchange",function(){if(location.hash!=="#/node-ref")return;'+refPage.match(/<script>([\s\S]*)<\/script>/)[1]+'});</script>');
+    }
     if (u.pathname === "/api/landing") {
       const p = Number(u.searchParams.get("page")) || 1;
       return send(200, "application/json", JSON.stringify({ host, page: p, rows: [1, 2, 3].map((i) => host + "-p" + p + "-" + i), cookie: String(req.headers.cookie || "") }));
@@ -118,7 +137,7 @@ function handle(req, res) {
     }
     if (u.pathname === "/api/websiteanalysis/GetTrafficSourcesTotalReferralsTable") return send(200, "application/json", JSON.stringify({ TotalCount: 2, TotalVisits: 9, Categories: { x: [] }, Records: u.searchParams.has("empty") ? [] : [refRec("in-a.com"), refRec("in-b.com")] }));
     if (u.pathname === "/api/websiteanalysis/GetOutgoingTable") return send(200, "application/json", JSON.stringify({ TotalCount: 3, TotalVisits: 99, Topics: [{ Name: "t" }],
-      Records: [refRec("link.com", [refRec("checkout.link.com"), refRec("link.com")]), refRec("higgsfield.ai"), refRec("suno.com")] }));
+      Records: [...(nodeCondition ? [refRec("node"+(/sw_node=(\d+)/.exec(req.headers.cookie||"")||[])[1]+".test")] : []), refRec("link.com", [refRec("checkout.link.com"), refRec("link.com")]), refRec("higgsfield.ai"), refRec("suno.com")] }));
     if (u.pathname === "/ref") return send(200, "text/html; charset=utf-8", refPage);
     if (u.pathname === "/refempty") return send(200, "text/html; charset=utf-8", refPage.replaceAll("?", "?empty=1&"));
     if (u.pathname === "/lp" || u.pathname === "/lp429" || u.pathname === "/lpflaky") return send(200, "text/html; charset=utf-8", lpPage);
@@ -131,7 +150,7 @@ function handle(req, res) {
   }
   send(404, "text/plain", "");
 }
-const HOSTS = ["new.web.cafe", "pro.similarweb.com", "sim.3ue.com"];
+const HOSTS = ["new.web.cafe", "pro.similarweb.com", "sim.3ue.com", "dash.3ue.com"];
 const id = (c) => c.repeat(32);
 async function waitReport(rid, ms = 40000) {
   for (let t = 0; t < ms; t += 200) {
@@ -140,6 +159,51 @@ async function waitReport(rid, ms = 40000) {
     await sleep(200);
   }
   return null;
+}
+
+async function checkNodes(context,sw,panel) {
+    // Node preparation + the real capture bridge: prepared shell initially has no
+    // job, then the owned-job handshake must re-arm capture before navigation.
+    await panel.check('#similarwebNodeMode');
+    await panel.fill('#similarwebNodes','4,1,2,3');
+    await panel.click('#saveSimilarwebNodes');
+    await panel.waitForFunction(()=>/已启用/.test(document.getElementById('similarwebNodeState').textContent));
+    await sw.evaluate(()=>{
+      self.__nodeEvents=[];
+      const prepare=self.GefeiSimilarwebNodes.prepare;
+      self.GefeiSimilarwebNodes.prepare=(api,config,options)=>prepare(api,config,{...options,polls:8,foregroundAfterMs:200});
+      chrome.tabs.onCreated.addListener(t=>self.__nodeEvents.push({kind:'created',id:t.id,opener:t.openerTabId,url:t.url,pending:t.pendingUrl}));
+      chrome.tabs.onUpdated.addListener((id,info,t)=>{if(t.openerTabId)self.__nodeEvents.push({kind:'updated',id,opener:t.openerTabId,url:t.url,status:t.status});});
+    });
+    nodeCondition='healthy';nodeOpens=[];
+    queue.push({requestId:id('e'),kind:'capture',site:'similarweb',path:'/#/node-ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const node4=await waitReport(id('e'),60000);
+    check('节点4优先：门户与会话真实执行，同文档hash导航重新捕获',node4?.ok&&node4.data.sourceNode===4&&node4.data.rows.some(r=>r.domain==='node4.test')&&node4.data.finalUrl.endsWith('/#/node-ref')&&nodeOpens.join()==='4',node4?.error);
+    if(!node4?.ok)console.log('node preparation diagnostics',JSON.stringify({nodeOpens,events:await sw.evaluate(()=>self.__nodeEvents),pages:await Promise.all(context.pages().map(async p=>({url:p.url(),text:(await p.locator('body').innerText().catch(()=>'' )).slice(0,180)})))}));
+    nodeCondition='busy4';nodeOpens=[];
+    queue.push({requestId:id('f'),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const fallback=await waitReport(id('f'),60000);
+    check('节点4明确繁忙才备用1：失败页已关闭，报告来自备用会话',fallback?.ok&&fallback.data.sourceNode===1&&fallback.data.rows.some(r=>r.domain==='node1.test')&&nodeOpens.join()==='4,1',fallback?.error);
+    nodeCondition='healthy';nodeOpens=[];
+    queue.push({requestId:'12'.repeat(16),kind:'capture',site:'similarweb',path:'/lp',extract:'sw_landing',quietMs:1500,minMs:0,pager:{near:'out of',times:10,waitMs:1500}});
+    await sw.evaluate(()=>agentPoll(true));
+    const hostedNode=await waitReport('12'.repeat(16),60000);
+    check('网站发现共用节点4且继续翻页、保留旧升级停止保护',hostedNode?.ok&&hostedNode.data.sourceNode===4&&hostedNode.data.rows.length===4&&/不完整/.test(hostedNode.data.pagerEnd),hostedNode?.error);
+    nodeOpens=[];
+    queue.push({requestId:'14'.repeat(16),kind:'fetch',site:'similarweb',path:'/',requests:['/api/landing?page=7'],delayMs:300});
+    await sw.evaluate(()=>agentPoll(true));
+    const nodeFetch=await waitReport('14'.repeat(16),60000);
+    check('节点模式兼容既有fetch：沿所选节点会话请求，不启用capture专用钩子',nodeFetch?.ok&&/sw_node=4/.test(nodeFetch.data.results[0].body)&&nodeOpens.join()==='4',nodeFetch?.error);
+    nodeCondition='blocked';nodeOpens=[];
+    queue.push({requestId:'13'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const blockedNode=await waitReport('13'.repeat(16),60000);
+    const nodeCooldown=await sw.evaluate(()=>chrome.storage.session.get('agentNextAt').then(r=>r.agentNextAt||0));
+    check('节点429停止并保持30分钟冷却，不借备用绕过',blockedNode&&!blockedNode.ok&&/疑似被限流/.test(blockedNode.error)&&nodeOpens.join()==='4'&&nodeCooldown-Date.now()>25*60000,blockedNode?.error);
+    await sw.evaluate(()=>chrome.storage.local.set({similarwebNodeMode:false}));nodeCondition='';
+
 }
 
 (async () => {
@@ -153,12 +217,12 @@ async function waitReport(rid, ms = 40000) {
   const extCopy = path.join(tmp, "ext");
   fs.cpSync(EXT, extCopy, { recursive: true, filter: (src) => !/[\\/](node_modules|\.git)([\\/]|$)/.test(src) });
   const mf = JSON.parse(fs.readFileSync(path.join(extCopy, "manifest.json"), "utf8"));
-  mf.host_permissions.push("https://pro.similarweb.com/*", "https://sim.3ue.com/*");
+  mf.host_permissions.push("https://pro.similarweb.com/*", "https://sim.3ue.com/*", "https://dash.3ue.com/*");
   fs.writeFileSync(path.join(extCopy, "manifest.json"), JSON.stringify(mf));
   const context = await playwright.chromium.launchPersistentContext(path.join(tmp, "profile"), {
     channel: "chromium", ignoreHTTPSErrors: true,
     args: ["--disable-extensions-except=" + extCopy, "--load-extension=" + extCopy, "--ignore-certificate-errors", "--no-proxy-server",
-      "--host-resolver-rules=" + HOSTS.map((h) => "MAP " + h + " 127.0.0.1:" + port).join(", ")],
+      "--host-resolver-rules=" + HOSTS.map((h) => "MAP " + h + " 127.0.0.1:" + port).concat(["MAP * ~NOTFOUND"]).join(", ")],
   });
   try {
     const sw = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker", { timeout: 10000 });
@@ -197,6 +261,16 @@ async function waitReport(rid, ms = 40000) {
     await panel0.close();
     check("配对：令牌交给插件、存下来、打开接任务", paired.ok === true && stored.agentToken.length === 52 && stored.agentOn === true && stored.agentServer === "https://new.web.cafe", JSON.stringify(paired));
     check("每分钟一次的闹钟定上了", !!(await sw.evaluate(() => chrome.alarms.get("gefei-agent-poll"))));
+
+    if(process.env.E2E_NODES_ONLY==='1'){
+      await sw.evaluate(()=>chrome.storage.local.set({similarwebBase:'https://sim.3ue.com'}));
+      const nodePanel=await context.newPage();
+      await nodePanel.goto('chrome-extension://'+new URL(sw.url()).host+'/sidepanel/sidepanel.html');
+      await nodePanel.waitForFunction(()=>!document.getElementById('similarwebNodeBox').hidden);
+      await checkNodes(context,sw,nodePanel);
+      console.log(failed?'节点验收未通过':'节点验收全部通过');
+      process.exitCode=failed?1:0;return;
+    }
 
     // ② capture + 翻页（默认官方地址）
     queue.push({ requestId: id("1"), kind: "capture", site: "similarweb", path: "/#/digitalsuite/landing?key=github.io", match: "/api/landing", quietMs: 1500, minMs: 0,
@@ -271,7 +345,7 @@ async function waitReport(rid, ms = 40000) {
     queue.push({ requestId: id("c"), kind: "capture", site: "similarweb", path: "/refempty", extract: "sw_referrals", match: "GetTrafficSourcesTotalReferralsTable", quietMs: 1500, minMs: 0 });
     await sw.evaluate(() => agentPoll(true));
     const rc = await waitReport(id("c"));
-    check("sw_referrals 零行：交回失败与原因，不伪装成成功数据", rc && !rc.ok && /整理出 0 行/.test(rc.error) && rc.data === null);
+    check("sw_referrals 零行：交回失败与原因，不伪装成成功数据", rc && !rc.ok && /来源 Records 数组为空/.test(rc.error) && rc.data === null);
     // 失败会把页面留给用户看；测试关掉自己的标签页再继续。
     for (const p of swTabs()) await p.close();
 
@@ -318,6 +392,8 @@ async function waitReport(rid, ms = 40000) {
     await panel.goto("chrome-extension://" + new URL(sw.url()).host + "/sidepanel/sidepanel.html");
     await panel.waitForFunction(() => document.getElementById("similarwebBase").value === "https://sim.3ue.com", null, { timeout: 3000 }).catch(() => {});
     check("侧边栏「远程任务」里显示 Similarweb 地址（镜像站）、已允许，没有脚本错误", (await panel.inputValue("#similarwebBase")) === "https://sim.3ue.com" && /已允许读 sim\.3ue\.com/.test(await panel.textContent("#similarwebPerm")) && !errs.length, errs.join("; "));
+
+    await checkNodes(context,sw,panel);
 
     // ⓪ 配对之后账号被撤了管理员：下一次去领就 403，清掉令牌、收起侧边栏这一块
     admin = false;

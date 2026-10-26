@@ -22,15 +22,27 @@
     if (pw || /(^|\/)(login|signin|sign-in|account\/login)(\/|$)/i.test(location.pathname)) { tell({ type: "capture:login" }); return; }
     if (++looks < 10) setTimeout(lookLogin, 3000);
   }
-  try {
-    chrome.runtime.sendMessage({ type: "capture:hello" }, function (r) {
-      void chrome.runtime.lastError;
-      mine = !!(r && r.job);
-      ctl(mine);
-      var q = buffered; buffered = [];
-      if (!mine) return;
-      q.forEach(forward);
-      setTimeout(lookLogin, 3000);
-    });
-  } catch (e) { mine = false; ctl(false); }
+  var checkSeq = 0;
+  function verify(done) {
+    var seq = ++checkSeq;
+    mine = null;
+    try {
+      chrome.runtime.sendMessage({ type: "capture:hello" }, function (r) {
+        void chrome.runtime.lastError;
+        if (seq !== checkSeq) { if (done) done({ ok: false }); return; }
+        mine = !!(r && r.job);
+        ctl(mine);
+        var q = buffered; buffered = [];
+        if (mine) { q.forEach(forward); looks = 0; setTimeout(lookLogin, 3000); }
+        if (done) done({ ok: mine });
+      });
+    } catch (e) { mine = false; buffered = []; ctl(false); if (done) done({ ok: false }); }
+  }
+  // A node shell loaded before the job existed and was intentionally disabled.
+  // Re-check the background's owned-job registry before enabling its existing hook.
+  if (chrome.runtime.onMessage) chrome.runtime.onMessage.addListener(function (msg, sender, respond) {
+    if (!msg || msg.type !== "capture:arm" || sender.id !== chrome.runtime.id) return false;
+    verify(respond); return true;
+  });
+  verify();
 })();

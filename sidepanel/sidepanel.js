@@ -547,6 +547,7 @@
   var SW = G.SITES.similarweb;
   var swBase = SW.defaultBase;
   function swPermState() {
+    $("similarwebNodeBox").hidden = swBase !== self.GefeiSimilarwebNodes.BASE;
     var host = swBase.replace(/^https:\/\//, "");
     $("similarwebBase").value = swBase === SW.defaultBase ? "" : swBase;
     chrome.permissions.contains({ origins: [swBase + "/*"] }).then(function (ok) {
@@ -570,6 +571,25 @@
       swPermState();
       $("similarwebSaved").textContent = "已保存：" + b.replace(/^https?:\/\//, "");
     });
+  });
+
+  chrome.storage.local.get(["similarwebNodeMode", "similarwebNodes"]).then(function (r) {
+    $("similarwebNodeMode").checked = r.similarwebNodeMode === true;
+    $("similarwebNodes").value = r.similarwebNodes || "4,1,2,3";
+  });
+  $("saveSimilarwebNodes").addEventListener("click", function () {
+    var order;
+    try { order = self.GefeiSimilarwebNodes.nodeOrder($("similarwebNodes").value).join(","); }
+    catch (e) { $("similarwebNodeState").textContent = e.message; return; }
+    var on = $("similarwebNodeMode").checked;
+    var allowed = on ? chrome.permissions.request({ origins: ["https://dash.3ue.com/*", "https://sim.3ue.com/*"] }) : Promise.resolve(true);
+    allowed.then(function (ok) {
+      if (!ok) { $("similarwebNodeState").textContent = "未授权，节点设置未保存。"; return; }
+      return chrome.storage.local.set({ similarwebNodeMode: on, similarwebNodes: order }).then(function () {
+        $("similarwebNodeState").textContent = on ? "已启用，节点顺序：" + order + "。仅明确繁忙或不可用时切换备用节点。" : "已关闭自动选择节点。";
+        swPermState();
+      });
+    }).catch(function () { $("similarwebNodeState").textContent = "节点设置保存失败。"; });
   });
 
   // 版本：本地加载的插件不会自动更新，谷歌趋势的内部接口一变就会取不到数，落后了就提示去下载新版

@@ -29,7 +29,7 @@
 //
 // MV3 的 service worker 随时可能被浏览器回收：进行中的取数任务存在 chrome.storage.session 里，不放内存。
 // 超时用 setTimeout，worker 被回收就丢了——对话页那边自己也有 60 秒的超时兜底，不会干等。
-importScripts("lib/trends-parse.js", "lib/ahrefs-parse.js", "lib/page-read.js", "lib/agent-jobs.js");
+importScripts("lib/trends-parse.js", "lib/ahrefs-parse.js", "lib/page-read.js", "lib/agent-jobs.js", "lib/similarweb-nodes.js");
 var P = self.GefeiTrendsParse;
 var A = self.GefeiAhrefsParse;
 var R = self.GefeiPageRead;
@@ -230,20 +230,28 @@ function openJob(msg, from, url, spec) {
     if (winId !== undefined) opts.windowId = winId;
     if (from.tab) opts.index = from.tab.index + 1;
     // 取完要切回哪个标签页：对话页发起的切回对话页；侧边栏发起的切回发起时正看着的那个
-    var back = from.tab && !from.panel ? Promise.resolve(from.tab.id)
+    var back = spec.preparedReturnTabId != null ? Promise.resolve(spec.preparedReturnTabId)
+      : from.tab && !from.panel ? Promise.resolve(from.tab.id)
       : chrome.tabs.query(winId !== undefined ? { active: true, windowId: winId } : { active: true, lastFocusedWindow: true })
         .then(function (t) { return t && t[0] ? t[0].id : null; }, function () { return null; });
     return back.then(function (returnTabId) {
-      return chrome.tabs.create(opts).then(function (tab) {
+      return (spec.preparedTabId ? chrome.tabs.get(spec.preparedTabId) : chrome.tabs.create(opts)).then(function (tab) {
         return loadJobs().then(function (jobs) {
           jobs[tab.id] = Object.assign({
             requestId: msg.requestId, url: url, returnTabId: returnTabId,
+            sourceNode: spec.preparedNode || null,
             originTabId: from.panel || from.agent ? null : from.tab.id, toPanel: !!from.panel, toAgent: !!from.agent,
             keepTab: !!(from.panel && msg.keepTab), // 调试用：取完不关，方便对照网页核对
-            startedAt: Date.now(), loadedAt: null, foregroundAt: opts.active ? Date.now() : null,
+            startedAt: Date.now(), loadedAt: null, foregroundAt: spec.preparedForegroundAt || opts.active ? Date.now() : null,
           }, spec.fields);
           return saveJobs(jobs);
         }).then(function () {
+          if (spec.preparedTabId) (spec.fields.kind === "capture"
+            ? chrome.tabs.sendMessage(tab.id, { type: "capture:arm" }).then(function (r) {
+              if (!r || !r.ok) throw new Error("capture not armed");
+            }) : Promise.resolve()).then(function () {
+            return chrome.tabs.update(tab.id, { url: opts.url });
+          }).catch(function () { finish(tab.id, { ok: false, error: "无法打开已选节点的报告。" }); });
           logActivity(msg.requestId, Object.assign({ from: fromLabel(from), stage: "opened", text: spec.opened }, spec.label));
           if (!spec.noForeground) setTimeout(function () { toForeground(tab.id); }, FOREGROUND_AFTER_MS);
           setTimeout(function () {
@@ -487,13 +495,19 @@ function startRemoteJob(msg, from) {
     if (!ok) return waitForAllow(msg, from, origin, msg.url, "page");
     var ready = msg.kind === "capture" ? ensureCaptureScripts() : Promise.resolve(true);
     return ready.then(function () {
+      return chrome.storage.local.get(["similarwebNodeMode", "similarwebNodes"]).then(function (config) {
+        if (msg.site !== "similarweb" || msg.base !== self.GefeiSimilarwebNodes.BASE || config.similarwebNodeMode !== true) return null;
+        return self.GefeiSimilarwebNodes.prepare(chrome, config, { foregroundAfterMs: FOREGROUND_AFTER_MS });
+      });
+    }).then(function (nodeSession) {
       return serial(function () {
         return loadJobs().then(function (jobs) {
           var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
-          if (dup) return null;
+          if (dup) { if (nodeSession) chrome.tabs.remove(nodeSession.tabId).catch(function () {}); return null; }
           var capture = msg.kind === "capture";
           return openJob(msg, from, msg.url, {
-            noMark: true,
+            noMark: true, preparedTabId: nodeSession && nodeSession.tabId, preparedNode: nodeSession && nodeSession.node,
+            preparedReturnTabId: nodeSession && nodeSession.returnTabId, preparedForegroundAt: nodeSession && nodeSession.foregroundAt,
             noForeground: !capture, // fetch 不用页面画出来，后台标签页就够；capture 要页面自己去请求，后台叫不醒时切到前台
             timeoutMs: msg.timeoutMs,
             fields: capture
@@ -505,6 +519,9 @@ function startRemoteJob(msg, from) {
             onTimeout: function (tabId) { if (capture) finishCapture(tabId, true); else finish(tabId, { ok: false, error: Math.round((msg.timeoutMs || JOB_TIMEOUT_MS) / 1000) + " 秒内没请求完——已把那个标签页切到前台，看一眼就知道" }, true); },
           });
         });
+      }).catch(function (e) {
+        if (nodeSession) chrome.tabs.remove(nodeSession.tabId).catch(function () {});
+        throw e;
       });
     });
   });
@@ -685,6 +702,7 @@ function finishCapture(tabId, timedOut) {
       }
       var head = { kind: "capture", captured_at: new Date().toISOString(), url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
         pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut };
+      if (job.sourceNode) head.sourceNode = job.sourceNode;
       if (job.extract) {
         // 带解析器：只交整理好的行（不带原始数据、不带接口清单）；一行都没整理出来才算失败
         var x = G.runExtract(job.extract, job.items) || { rows: [] };
