@@ -2,6 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const N=require('../lib/similarweb-nodes');
+const G=require('../lib/agent-jobs');
 const source=fs.readFileSync(path.join(__dirname,'../background.js'),'utf8');
 const recovery=source.slice(source.indexOf('async function recoverInitialCapture('),source.indexOf('\nfunction captureCheck('));
 function harness(options={}){
@@ -47,4 +48,21 @@ test('missing trusted document identity disables reload and keeps the existing w
 test('an uncommitted navigation to the authorized report keeps waiting without reloading about:blank',async()=>{
   const h=harness({url:'about:blank',status:'loading',pendingUrl:N.BASE+'/#/report'});await h.context.recoverInitialCapture(7);
   assert.equal(h.probes.length,0);assert.equal(h.reloaded.length,0);assert.equal(h.finished.length,0);assert.equal(h.job.initialLoadRetried,undefined);
+});
+for(const extract of ['sw_referrals','sw_landing'])test(extract+': unrelated traffic cannot postpone the initial reload',async()=>{
+  const h=harness({job:{extract,match:'report-api',minMs:0,quietMs:6000,bytes:0,pagesDone:0}});let now=35000;
+  Object.assign(h.context,{G,Date:{now:()=>now},INITIAL_CAPTURE_RELOAD_MS:30000});
+  vm.runInNewContext(source.slice(source.indexOf('function onCaptureItem('),source.indexOf('/** 过一会儿看一眼'))+'\n'+
+    source.slice(source.indexOf('function captureCheck('),source.indexOf('/** 点一下')),h.context);
+  for(let i=0;i<10;i++){
+    await h.context.onCaptureItem(7,{url:N.BASE+'/unrelated-heartbeat',status:200,body:'{}'},'current-document');
+    now+=1000;await h.context.captureCheck(7);now+=4000;
+  }
+  assert.equal(h.job.items.length,0);assert.deepEqual(h.reloaded,[7]);assert.equal(h.job.startedAt,123);
+});
+test('after report data arrives the original quiet period still prevents premature finalization',async()=>{
+  const h=harness({job:{items:[{page:0}],lastAt:35000,quietMs:6000,minMs:0}});let finished=0;
+  Object.assign(h.context,{Date:{now:()=>36000},finishCapture(){finished++}});
+  vm.runInNewContext(source.slice(source.indexOf('function captureCheck('),source.indexOf('/** 点一下')),h.context);
+  await h.context.captureCheck(7);assert.equal(finished,0);assert.equal(h.reloaded.length,0);
 });

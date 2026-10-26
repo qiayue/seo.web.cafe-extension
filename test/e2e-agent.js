@@ -100,7 +100,7 @@ function handle(req, res) {
   if (host === "dash.3ue.com") {
     if(u.pathname==='/zh-Hans/'){
       portalLoads++;
-      if(nodeCondition==='portalStall'&&portalLoads===1)return send(200,'text/html; charset=utf-8','<main>正在加载用户中心</main>');
+      if(nodeCondition==='portalCancel'||nodeCondition==='portalStall'&&portalLoads===1)return send(200,'text/html; charset=utf-8','<main>正在加载用户中心</main>');
       if(nodeCondition==='portalChallenge')return send(200,'text/html; charset=utf-8','<main>请完成人机验证</main>');
     }
     return send(200,"text/html; charset=utf-8",nodeCondition.startsWith('sameTab')?nodePortal.replace("'_blank'","'_self'"):nodePortal);
@@ -131,7 +131,7 @@ function handle(req, res) {
       if(nodeCondition==='sourceChallenge')return send(200,'text/html; charset=utf-8','<main>请完成人机验证</main>');
       if((nodeCondition==='busy4'||nodeCondition==='sameTabBusy4')&&node===4)return send(503,'text/html; charset=utf-8','节点4繁忙，请稍后');
       res.writeHead(200,{'content-type':'text/html; charset=utf-8','set-cookie':'sw_node='+node+'; Path=/; Secure; SameSite=Lax'});
-      return res.end('<div id="react-app">Web Intelligence 网站分析</div><script>history.replaceState(null,"","/");window.addEventListener("hashchange",function(){if(location.hash!=="#/node-ref")return;'+refPage.match(/<script>([\s\S]*)<\/script>/)[1]+'});</script>');
+      return res.end('<div id="react-app">Web Intelligence 网站分析'+(nodeCondition==='reportValues'?' 总访问量 429 来源网站 forbiddenplanet.com 关键词 service unavailable':'')+'</div><script>history.replaceState(null,"","/");window.addEventListener("hashchange",function(){if(location.hash!=="#/node-ref")return;'+refPage.match(/<script>([\s\S]*)<\/script>/)[1]+'});</script>');
     }
     if (u.pathname === "/api/landing") {
       const p = Number(u.searchParams.get("page")) || 1;
@@ -153,6 +153,10 @@ function handle(req, res) {
     if(u.pathname==='/refstall'){
       reportLoads++;
       return send(200,'text/html; charset=utf-8',reportLoads===1?'<div id="react-app">Web Intelligence 网站分析</div>':refPage);
+    }
+    if(u.pathname==='/refheartbeat'){
+      reportLoads++;
+      return send(200,'text/html; charset=utf-8',reportLoads===1?'<div id="react-app">Web Intelligence 网站分析</div><script>setInterval(()=>fetch("/api/other"),100);</script>':refPage);
     }
     if(u.pathname==='/refchallenge'){
       reportLoads++;
@@ -251,6 +255,54 @@ async function checkNodes(context,sw,panel) {
     await sw.evaluate(()=>agentPoll(true));
     const reportChallenge=await waitReport('21'.repeat(16),60000);
     check('报告初始人工验证停止，不整页重试',reportChallenge&&!reportChallenge.ok&&/人工验证/.test(reportChallenge.error)&&reportLoads===1,reportChallenge?.error);
+    nodeCondition='reportHeartbeat';nodeOpens=[];reportLoads=0;
+    // Allow the report navigation to commit before testing its stalled network.
+    await sw.evaluate(()=>{INITIAL_CAPTURE_RELOAD_MS=2000});
+    // '22'.repeat(16) would collide with the earlier id('2') capture.
+    queue.push({requestId:'26'.repeat(16),kind:'capture',site:'similarweb',path:'/refheartbeat',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const heartbeat=await waitReport('26'.repeat(16),60000);
+    check('报告无数据且持续收到无关响应时仍只重载一次并完成采集',heartbeat?.ok&&heartbeat.data.initialLoadReloads===1&&reportLoads===2&&heartbeat.data.rows.length>0,JSON.stringify({ok:heartbeat?.ok,error:heartbeat?.error,reloads:heartbeat?.data?.initialLoadReloads,reportLoads,rows:heartbeat?.data?.rows?.length}));
+    nodeCondition='reportValues';nodeOpens=[];
+    queue.push({requestId:'23'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>agentPoll(true));
+    const ordinary=await waitReport('23'.repeat(16),60000);
+    check('普通429统计、forbidden域名和错误相关关键词不触发限流或备用节点',ordinary?.ok&&ordinary.data.sourceNode===4&&nodeOpens.join()==='4',ordinary?.error);
+    nodeCondition='portalCancel';nodeOpens=[];portalLoads=0;
+    cancelIds.add('24'.repeat(16));
+    queue.push({requestId:'24'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+    await sw.evaluate(()=>{void agentPoll(true)});
+    const cancelledPreparation=await waitReport('24'.repeat(16),20000);
+    await sleep(300);
+    check('用户中心准备阶段撤销后关闭所属页面，不再打开报告或选择备用节点',cancelledPreparation&&!cancelledPreparation.ok&&/撤销/.test(cancelledPreparation.error)&&nodeOpens.length===0&&!context.pages().some(p=>p.url().startsWith('https://dash.3ue.com')),cancelledPreparation?.error);
+    nodeCondition='healthy';nodeOpens=[];
+    await sw.evaluate(()=>{
+      const original=saveJobs;let release,paused=false;
+      const gate=new Promise(r=>{release=r});
+      self.__registrationPaused=false;
+      self.__releaseRegistration=release;
+      self.__restoreRegistration=()=>{saveJobs=original};
+      saveJobs=jobs=>{
+        if(!paused&&Object.values(jobs).some(j=>j.requestId==='25'.repeat(16))){
+          paused=true;self.__registrationPaused=true;return gate.then(()=>original(jobs));
+        }
+        return original(jobs);
+      };
+    });
+    try {
+      queue.push({requestId:'25'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
+      await sw.evaluate(()=>{void agentPoll(true)});
+      for(let i=0;i<100&&!await sw.evaluate(()=>self.__registrationPaused);i++)await sleep(100);
+      const registrationPaused=await sw.evaluate(()=>self.__registrationPaused);
+      cancelIds.add('25'.repeat(16));
+      await sw.evaluate(()=>{void agentReport('25'.repeat(16),{stage:'progress',note:'registration cancellation test'})});
+      for(let i=0;i<50&&!await sw.evaluate(()=>remoteStarts['25'.repeat(16)]?.cancelled);i++)await sleep(100);
+      const cancellationObserved=await sw.evaluate(()=>!!remoteStarts['25'.repeat(16)]?.cancelled);
+      await sw.evaluate(()=>self.__releaseRegistration());
+      const cancelledRegistration=await waitReport('25'.repeat(16),10000);
+      await sleep(500);
+      check('登记过程中撤销只上报一次最终结果，正常清理任务',registrationPaused&&cancellationObserved&&cancelledRegistration&&!cancelledRegistration.ok&&/撤销/.test(cancelledRegistration.error)&&reports.filter(r=>r.requestId==='25'.repeat(16)&&'ok' in r).length===1&&await sw.evaluate(()=>loadJobs().then(j=>!Object.values(j).some(x=>x.requestId==='25'.repeat(16)))),JSON.stringify({registrationPaused,cancellationObserved,error:cancelledRegistration?.error}));
+    } finally { await sw.evaluate(()=>{self.__releaseRegistration();self.__restoreRegistration()}); }
     nodeCondition='blocked';nodeOpens=[];
     queue.push({requestId:'13'.repeat(16),kind:'capture',site:'similarweb',path:'/ref',extract:'sw_referrals',match:'GetOutgoingTable',quietMs:1000,minMs:0});
     await sw.evaluate(()=>agentPoll(true));

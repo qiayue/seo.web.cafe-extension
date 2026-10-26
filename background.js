@@ -225,6 +225,7 @@ function onAllowGranted() {
 /** 开取数标签页、记进任务表（在 startJob 的串行队列里调用）。spec：fields（这类任务自己的字段）、label（任务日志里怎么写）、
  *  opened（开好之后报的第一句）、onTimeout（到点还没交：默认当失败） */
 function openJob(msg, from, url, spec) {
+    if (spec.checkCancelled) spec.checkCancelled();
     var winId = from.tab ? from.tab.windowId : (Number.isInteger(msg.windowId) ? msg.windowId : undefined);
     // 记号只给谷歌趋势 / Ahrefs：随便一个网页加上 #记号，靠 # 分页面的单页应用会被带错页
     var opts = { url: url + (spec.noMark ? "" : AWAKE_MARK), active: !!(from.panel && msg.foreground) }; // 侧边栏可选「前台打开」，排查慢的时候对照用
@@ -236,8 +237,11 @@ function openJob(msg, from, url, spec) {
       : chrome.tabs.query(winId !== undefined ? { active: true, windowId: winId } : { active: true, lastFocusedWindow: true })
         .then(function (t) { return t && t[0] ? t[0].id : null; }, function () { return null; });
     return back.then(function (returnTabId) {
+      if (spec.checkCancelled) spec.checkCancelled();
       return (spec.preparedTabId ? chrome.tabs.get(spec.preparedTabId) : chrome.tabs.create(opts)).then(function (tab) {
+        var registered = false;
         return loadJobs().then(function (jobs) {
+          if (spec.checkCancelled) spec.checkCancelled();
           jobs[tab.id] = Object.assign({
             requestId: msg.requestId, url: url, returnTabId: returnTabId,
             sourceNode: spec.preparedNode || null,
@@ -246,12 +250,24 @@ function openJob(msg, from, url, spec) {
             keepTab: !!(from.panel && msg.keepTab), // 调试用：取完不关，方便对照网页核对
             startedAt: Date.now(), loadedAt: null, foregroundAt: spec.preparedForegroundAt || opts.active ? Date.now() : null,
           }, spec.fields);
-          return saveJobs(jobs);
+          return saveJobs(jobs).then(function () {
+            registered = true;
+            // The stuck-task grace covers the report timeout, starting after
+            // node preparation. Keep a long busy-node fallback from consuming it.
+            if (!from.agent || !spec.preparedTabId) return;
+            return chrome.storage.session.get("agentRunning").then(function (r) {
+              if (r.agentRunning && r.agentRunning.id === msg.requestId) {
+                return chrome.storage.session.set({ agentRunning: Object.assign({}, r.agentRunning, { at: jobs[tab.id].startedAt }) });
+              }
+            });
+          });
         }).then(function () {
+          if (spec.checkCancelled) spec.checkCancelled();
           if (spec.preparedTabId) (spec.fields.kind === "capture"
             ? chrome.tabs.sendMessage(tab.id, { type: "capture:arm" }).then(function (r) {
               if (!r || !r.ok) throw new Error("capture not armed");
             }) : Promise.resolve()).then(function () {
+            if (spec.checkCancelled) spec.checkCancelled();
             return chrome.tabs.update(tab.id, { url: opts.url });
           }).catch(function () { finish(tab.id, { ok: false, error: "无法打开已选节点的报告。" }); });
           logActivity(msg.requestId, Object.assign({ from: fromLabel(from), stage: "opened", text: spec.opened }, spec.label));
@@ -261,6 +277,15 @@ function openJob(msg, from, url, spec) {
             if (spec.onTimeout) return spec.onTimeout(tab.id);
             finish(tab.id, { ok: false, error: (JOB_TIMEOUT_MS / 1000) + " 秒内没取到数据（谷歌趋势页面可能没加载完，或要求人机验证）——已把那个标签页切到前台，看一眼就知道" }, true);
           }, spec.timeoutMs || JOB_TIMEOUT_MS);
+        }).catch(function (error) {
+          // Once persisted, only registry finalization reports the result.
+          // Throwing here would also report via agentPoll's startup catch.
+          if (registered && spec.checkCancelled) {
+            finish(tab.id, { ok: false, error: String(error && error.message || error) }, false, true);
+            return;
+          }
+          if (spec.checkCancelled) chrome.tabs.remove(tab.id).catch(function () {});
+          throw error;
         });
       });
     });
@@ -491,45 +516,75 @@ function onAhrefsCaptured(tabId, msg) {
 
 // ---------- 远程任务：capture（截下页面自己请求回来的数据，可以点「下一页」翻页）/ fetch（在网页里带登录态请求它自己的接口） ----------
 // 只给远程任务用（侧边栏、对话页不发这两类）。网站还没允许读：同「打开网页」，在旁边打开「允许」页面等你点
+var remoteStarts = Object.create(null);
+/** Cancellation must also cover a node session not yet handed to openJob. */
+function cancelRemoteJob(requestId, error) {
+  var pending = remoteStarts[requestId];
+  if (pending) pending.cancelled = true;
+  // Wait for any registration already in flight, then use normal finalization.
+  return serial(function () {
+    return loadJobs().then(function (jobs) {
+      return Object.keys(jobs).filter(function (k) { return jobs[k].requestId === requestId; });
+    });
+  }).then(function (keys) {
+    return Promise.all(keys.map(function (k) { return finish(Number(k), { ok: false, error: error }, false, true); }));
+  });
+}
 function startRemoteJob(msg, from) {
   if (!from.agent) return Promise.reject(new Error("这类任务只接 new.web.cafe 派来的"));
   var origin = new URL(msg.url).origin, host = new URL(msg.url).host;
-  return chrome.permissions.contains({ origins: [origin + "/*"] }).then(function (ok) {
-    if (!ok) return waitForAllow(msg, from, origin, msg.url, "page");
-    var ready = msg.kind === "capture" ? ensureCaptureScripts() : Promise.resolve(true);
-    return ready.then(function () {
-      return chrome.storage.local.get(["similarwebNodeMode", "similarwebNodes"]).then(function (config) {
-        if (msg.site !== "similarweb" || msg.base !== self.GefeiSimilarwebNodes.BASE || config.similarwebNodeMode !== true) return null;
-        return self.GefeiSimilarwebNodes.prepare(chrome, config, { foregroundAfterMs: FOREGROUND_AFTER_MS,
-          onProgress: function (note) { agentReport(msg.requestId, { stage: "progress", note: note }); } });
-      });
-    }).then(function (nodeSession) {
-      return serial(function () {
-        return loadJobs().then(function (jobs) {
-          var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
-          if (dup) { if (nodeSession) chrome.tabs.remove(nodeSession.tabId).catch(function () {}); return null; }
-          var capture = msg.kind === "capture";
-          return openJob(msg, from, msg.url, {
-            noMark: true, preparedTabId: nodeSession && nodeSession.tabId, preparedNode: nodeSession && nodeSession.node,
-            preparedReturnTabId: nodeSession && nodeSession.returnTabId, preparedForegroundAt: nodeSession && nodeSession.foregroundAt,
-            preparationReloads: nodeSession && nodeSession.preparationReloads,
-            noForeground: !capture, // fetch 不用页面画出来，后台标签页就够；capture 要页面自己去请求，后台叫不醒时切到前台
-            timeoutMs: msg.timeoutMs,
-            fields: capture
-              ? { kind: "capture", origin: origin, match: msg.match || "", extract: msg.extract || "", pace: msg.pace === "fast" ? "fast" : "normal", throttled: "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
-                items: [], seen: [], bytes: 0, lastAt: null, pagesDone: 0, pagerEnd: "", loginSeen: false }
-              : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, transport: msg.transport === "xhr" ? "xhr" : "fetch", fetching: false },
-            label: { keyword: host, range: capture ? "截数据" + (msg.pager ? "（翻页）" : "") : "请求接口 ×" + msg.requests.length, geo: "" },
-            opened: "已在后台打开 " + host + "，等页面加载…",
-            onTimeout: function (tabId) { if (capture) finishCapture(tabId, true); else finish(tabId, { ok: false, error: Math.round((msg.timeoutMs || JOB_TIMEOUT_MS) / 1000) + " 秒内没请求完——已把那个标签页切到前台，看一眼就知道" }, true); },
-          });
+  if (remoteStarts[msg.requestId]) return remoteStarts[msg.requestId].promise;
+  var pending = { cancelled: false };
+  remoteStarts[msg.requestId] = pending;
+  function checkCancelled() { if (pending.cancelled) throw new Error("任务已撤销，停止本次采集。"); }
+  pending.promise = loadJobs().then(function (jobs) {
+    checkCancelled();
+    if (Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; })) return;
+    return chrome.permissions.contains({ origins: [origin + "/*"] }).then(function (ok) {
+      checkCancelled();
+      if (!ok) return waitForAllow(msg, from, origin, msg.url, "page");
+      var ready = msg.kind === "capture" ? ensureCaptureScripts() : Promise.resolve(true);
+      return ready.then(function () {
+        return chrome.storage.local.get(["similarwebNodeMode", "similarwebNodes"]).then(function (config) {
+          checkCancelled();
+          if (msg.site !== "similarweb" || msg.base !== self.GefeiSimilarwebNodes.BASE || config.similarwebNodeMode !== true) return null;
+          return self.GefeiSimilarwebNodes.prepare(chrome, config, { foregroundAfterMs: FOREGROUND_AFTER_MS,
+            checkCancelled: checkCancelled,
+            onProgress: function (note) { agentReport(msg.requestId, { stage: "progress", note: note }); } });
         });
-      }).catch(function (e) {
-        if (nodeSession) chrome.tabs.remove(nodeSession.tabId).catch(function () {});
-        throw e;
+      }).then(function (nodeSession) {
+        return serial(function () {
+          return loadJobs().then(function (jobs) {
+            checkCancelled();
+            var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
+            if (dup) { if (nodeSession) chrome.tabs.remove(nodeSession.tabId).catch(function () {}); return null; }
+            var capture = msg.kind === "capture";
+            return openJob(msg, from, msg.url, {
+              noMark: true, preparedTabId: nodeSession && nodeSession.tabId, preparedNode: nodeSession && nodeSession.node,
+              preparedReturnTabId: nodeSession && nodeSession.returnTabId, preparedForegroundAt: nodeSession && nodeSession.foregroundAt,
+              preparationReloads: nodeSession && nodeSession.preparationReloads,
+              checkCancelled: checkCancelled,
+              noForeground: !capture, // fetch 不用页面画出来，后台标签页就够；capture 要页面自己去请求，后台叫不醒时切到前台
+              timeoutMs: msg.timeoutMs,
+              fields: capture
+                ? { kind: "capture", origin: origin, match: msg.match || "", extract: msg.extract || "", pace: msg.pace === "fast" ? "fast" : "normal", throttled: "", minMs: msg.minMs, quietMs: msg.quietMs, maxItems: msg.maxItems, pager: msg.pager || null,
+                  items: [], seen: [], bytes: 0, lastAt: null, pagesDone: 0, pagerEnd: "", loginSeen: false }
+                : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, transport: msg.transport === "xhr" ? "xhr" : "fetch", fetching: false },
+              label: { keyword: host, range: capture ? "截数据" + (msg.pager ? "（翻页）" : "") : "请求接口 ×" + msg.requests.length, geo: "" },
+              opened: "已在后台打开 " + host + "，等页面加载…",
+              onTimeout: function (tabId) { if (capture) finishCapture(tabId, true); else finish(tabId, { ok: false, error: Math.round((msg.timeoutMs || JOB_TIMEOUT_MS) / 1000) + " 秒内没请求完——已把那个标签页切到前台，看一眼就知道" }, true); },
+            });
+          });
+        }).catch(function (e) {
+          if (nodeSession) chrome.tabs.remove(nodeSession.tabId).catch(function () {});
+          throw e;
+        });
       });
     });
+  }).finally(function () {
+    if (remoteStarts[msg.requestId] === pending) delete remoteStarts[msg.requestId];
   });
+  return pending.promise;
 }
 
 /** 页面交上来一段数据：记进「请求过哪些接口」；是 JSON、对得上 match、没超量的收下 */
@@ -680,13 +735,13 @@ function captureCheck(tabId) {
     var job = jobs[tabId];
     if (!job || job.kind !== "capture" || job.paging) return;
     var now = Date.now();
-    if (job.lastAt && now - job.lastAt < job.quietMs) return; // 还有数据在进来：等下一次（每段数据都会再约一次）
     if (now < (job.loadedAt || job.startedAt) + job.minMs) { scheduleCaptureCheck(tabId, (job.loadedAt || job.startedAt) + job.minMs - now); return; }
     // 一段要的数据都还没来（页面还在加载，或接口都还没打）：接着等，到点由超时收尾（那时把请求过的接口清单交回去，摸接口用）
     if (!job.items.length) {
       if (job.origin === self.GefeiSimilarwebNodes.BASE && !job.initialLoadRetried && now - job.startedAt >= INITIAL_CAPTURE_RELOAD_MS) return recoverInitialCapture(tabId);
       scheduleCaptureCheck(tabId, job.quietMs); return;
     }
+    if (job.lastAt && now - job.lastAt < job.quietMs) return; // 已有报告数据时，仍等网络安静后再翻页
     // 点了「下一页」却没有新数据进来：先多等一会儿（接口慢）；还没有就再点一次（那一下可能没点上）；
     // 两次都不行才算翻到底了（或者到了账号能看的上限，比如官方账号只给前 100 条），别一直点下去。
     // 实测只等一次的话，pages.dev 4 月翻到第 2 页就停了（199 行）、vercel.app 4 月重抓两次都停在 897 行
@@ -893,12 +948,10 @@ function agentApi(method, body) {
 }
 /** 报进度（失败无所谓） */
 function agentReport(requestId, body) {
-  agentApi("POST", Object.assign({ requestId: requestId }, body)).then(function (j) {
+  return agentApi("POST", Object.assign({ requestId: requestId }, body)).then(function (j) {
     // 在 new.web.cafe 被撤销了（或者已经结束）：这边也停下、关掉标签页，别接着翻
     if (j && j.cancelled) {
-      loadJobs().then(function (jobs) {
-        Object.keys(jobs).forEach(function (k) { if (jobs[k].requestId === requestId) finish(Number(k), { ok: false, error: "任务在 new.web.cafe 被撤销了" }, false, true); });
-      });
+      return cancelRemoteJob(requestId, "任务在 new.web.cafe 被撤销了");
     }
   }).catch(function () {});
 }
@@ -1055,9 +1108,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (msg.type === "trends:cancel" && /^[a-f0-9]{32}$/.test(String(msg.requestId || ""))) {
     // 对话页点了停止（或侧边栏取消）：结束这张单、关掉它开的标签页。只认同样两处发来的
     var okSender = (sender.id === chrome.runtime.id && String(sender.url || "").indexOf(PANEL_URL) === 0) || (!!sender.tab && sender.origin === SITE_ORIGIN);
-    if (okSender) loadJobs().then(function (jobs) {
-      Object.keys(jobs).forEach(function (k) { if (jobs[k].requestId === msg.requestId) finish(Number(k), { ok: false, error: "已取消（点了停止）" }, false, true); });
-    });
+    if (okSender) cancelRemoteJob(msg.requestId, "已取消（点了停止）");
     // 还在等「允许」的：关掉那个页面，单子作废
     if (okSender) loadAllows().then(function (allows) {
       Object.keys(allows).forEach(function (k) { if (allows[k].msg.requestId === msg.requestId) endAllow(Number(k), false, "点了停止"); });

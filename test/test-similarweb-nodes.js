@@ -10,6 +10,27 @@ test('verification text in report keywords is data, while an actual gate still s
     assert.equal(N.sourceState(),'ready');showAlert=true;assert.equal(N.sourceState(),'challenge');
   }finally{if(saved===undefined)delete global.document;else global.document=saved;}
 });
+for (const text of ['总访问量 429', '来源网站 forbiddenplanet.com', '关键词 service unavailable', '关键词 gateway timeout']) {
+  test('ready report content does not become a source gate: '+text,()=>{
+    const saved=global.document;
+    try {
+      global.document={body:{innerText:'Web Intelligence 网站分析 '+text},querySelector:s=>s==='#react-app'?{}:null,querySelectorAll:()=>[]};
+      assert.equal(N.sourceState(),'ready');
+    } finally { if(saved===undefined)delete global.document;else global.document=saved; }
+  });
+}
+for (const [text,state] of [['429 Too Many Requests','blocked'],['403 Forbidden','blocked'],['节点4繁忙','busy'],['请完成人机验证','challenge']]) {
+  test('visible source notice and standalone error still stop: '+text,()=>{
+    const saved=global.document;
+    try {
+      const notice={innerText:text,getClientRects:()=>[{}]};
+      global.document={body:{innerText:'Web Intelligence 网站分析 '+text},querySelector:s=>s==='#react-app'?{}:null,querySelectorAll:s=>s.includes('[role=')?[notice]:[]};
+      assert.equal(N.sourceState(),state);
+      global.document={body:{innerText:text},querySelector:()=>null,querySelectorAll:()=>[]};
+      assert.equal(N.sourceState(),state);
+    } finally { if(saved===undefined)delete global.document;else global.document=saved; }
+  });
+}
 function fixture(scenario = {}) {
   let next = 1, listener, selected, reloads = 0, opened = [], removed = [], injected = [], activations = [];
   const tabs = new Map();
@@ -103,6 +124,19 @@ test('persistently blank portal exhausts its one reload without cycling nodes',a
   await assert.rejects(N.prepare(f.api,{}, {polls:6,now:()=>tick,foregroundAfterMs:5,portalReloadAfterMs:15,delay:async()=>{tick+=10}}),/自动重载一次后仍未就绪/);
   assert.equal(f.reloads,1);assert.deepEqual(f.opened,[]);assert.equal(f.tabs.size,0);
 });
+for (const scenario of [{portal:'wait'},{source:{4:'wait'}},{sameTab:true,source:{4:'wait'}}]) {
+  test('cancellation while preparing an owned tab cleans up without fallback: '+JSON.stringify(scenario),async()=>{
+    const f=fixture(scenario);let cancelled=false;
+    await assert.rejects(N.prepare(f.api,{}, {polls:5,delay:async()=>{cancelled=true},checkCancelled(){if(cancelled)throw Error('cancelled')}}),/cancelled/);
+    assert.equal(f.tabs.size,0);assert.equal(f.listening,false);assert.ok(f.opened.every(n=>n===4));
+  });
+}
+test('cancellation arriving with a ready probe cannot transfer ownership of the source tab',async()=>{
+  const f=fixture();let cancelled=false;const probe=f.api.scripting.executeScript;
+  f.api.scripting.executeScript=async spec=>{const result=await probe(spec);if(spec.func===N.sourceState)cancelled=true;return result};
+  await assert.rejects(N.prepare(f.api,{}, {delay:async()=>{},checkCancelled(){if(cancelled)throw Error('cancelled')}}),/cancelled/);
+  assert.equal(f.tabs.size,0);assert.equal(f.listening,false);
+});
 for(const portal of ['blocked','login','challenge'])test('portal '+portal+' never uses the reload recovery',async()=>{
   const f=fixture({portal});await assert.rejects(N.prepare(f.api,{}, {polls:5,portalReloadAfterMs:0,foregroundAfterMs:0,delay:async()=>{}}));
   assert.equal(f.reloads,0);
@@ -123,12 +157,12 @@ async function adapter(mode,base='https://sim.3ue.com',kind='capture') {
   const context={URL,Date,Number,Object,Promise,setTimeout(){},scheduleCaptureCheck(){},INITIAL_CAPTURE_RELOAD_MS:15,AWAKE_MARK:'',JOB_TIMEOUT_MS:100,FOREGROUND_AFTER_MS:10,
     self:{GefeiSimilarwebNodes:Nmock},serial:async cb=>cb(),loadJobs:async()=>jobs,saveJobs:async()=>{events.push('save')},
     logActivity(){},fromLabel(){return'cloud'},ensureCaptureScripts:async()=>{events.push('scripts')},waitForAllow:async()=>{throw Error('unexpected permission prompt')},
-    chrome:{permissions:{contains:async()=>true},storage:{local:{get:async()=>({similarwebNodeMode:mode})}},
+    chrome:{permissions:{contains:async()=>true},storage:{local:{get:async()=>({similarwebNodeMode:mode})},session:{get:async()=>({})}},
       tabs:{query:async()=>[{id:10}],create:async()=>{events.push('create');return{id:45}},get:async id=>({id}),
         sendMessage:async id=>{assert.ok(jobs[id]);events.push('arm');return{ok:true}},update:async id=>{assert.ok(jobs[id]);events.push('navigate')},reload:async()=>{throw Error('must not race a reload with navigation')},remove:async()=>{events.push('remove')}}},
   };
   vm.createContext(context);
-  vm.runInContext(fn('openJob','\nfunction fromLabel')+'\n'+fn('startRemoteJob','\n/** 页面交上来'),context);
+  vm.runInContext(fn('openJob','\nfunction fromLabel')+'\n'+background.slice(background.indexOf('var remoteStarts ='),background.indexOf('\n/** 页面交上来')),context);
   await context.startRemoteJob({requestId:'a'.repeat(32),kind,site:'similarweb',base,url:base+'/#/report',extract:'sw_referrals',pager:{times:19},requests:['/api/report']}, {agent:true});
   await new Promise(r=>setImmediate(r));return{events,jobs,context};
 }
