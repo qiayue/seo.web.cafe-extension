@@ -615,7 +615,9 @@ function onCaptureItem(tabId, msg, documentId) {
         job.targetStarted = (job.targetStarted || 0) + 1;
         return saveJobs(jobs).then(function () { return null; });
       }
-      if (target && ["network_error", "timeout", "abort", "body_read_failed"].indexOf(msg.event) >= 0) {
+      // A known HTTP failure takes precedence over failure to read its body.
+      var bodyHttpFailure = msg.event === "body_read_failed" && Number(msg.status) > 0 && (Number(msg.status) < 200 || Number(msg.status) >= 300);
+      if (target && !bodyHttpFailure && ["network_error", "timeout", "abort", "body_read_failed"].indexOf(msg.event) >= 0) {
         job.captureError = msg.event === "body_read_failed" ? "[body_read_failed] 已收到目标接口响应，但响应正文读取失败。"
           : msg.event === "timeout" ? "[request_timeout] 目标接口请求超时，未取得完整响应。"
           : msg.event === "abort" ? "[request_aborted] 目标接口请求被取消，未取得完整响应。"
@@ -623,7 +625,7 @@ function onCaptureItem(tabId, msg, documentId) {
         job.pagerEnd = job.captureError;
         return saveJobs(jobs).then(function () { return { job: job, stop: job.captureError }; });
       }
-      if (msg.event) return null;
+      if (msg.event && !bodyHttpFailure) return null;
       if (job.seen.length < G.MAX_SEEN) job.seen.push({ url: url, status: Number(msg.status) || 0, ct: String(msg.ct || "").slice(0, 100), size: Number(msg.size) || 0, page: job.pagesDone,
         via: msg.via === "xhr" ? "xhr" : "fetch", method: String(msg.method || "GET").slice(0, 10), reqHeaders: msg.reqHeaders && typeof msg.reqHeaders === "object" ? msg.reqHeaders : {} });
       var body = typeof msg.body === "string" ? msg.body : "";

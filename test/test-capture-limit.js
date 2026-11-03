@@ -246,3 +246,23 @@ test('final failure summary survives legacy wire format without source URLs or s
  assert.ok(h.posts[0].error.length<=500);assert.equal(h.posts[0].data,null);
  assert.doesNotMatch(JSON.stringify(h.posts[0]),/secret|must-not-leak|https:/);
 });
+
+for (const status of [403, 429, 500]) for (const retired of [false, true]) test(`unreadable HTTP ${status} body preserves HTTP handling, retired=${retired}`, async () => {
+  const h = harness(retired ? { ignoredDocumentId: 'old-document' } : {});
+  const writes = [];
+  h.context.chrome.storage.session.set = async value => writes.push(value);
+  const before = Date.now();
+  await h.context.onCaptureItem(7, { url: apiUrl, event: 'body_read_failed', status }, retired ? 'old-document' : 'current-document');
+  if (retired && status === 500) {
+    assert.equal(h.posts.length, 0, 'ordinary stale failures remain ignored');
+    return;
+  }
+  assert.equal(h.posts[0].ok, false);
+  assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, new RegExp('http_error.*HTTP ' + status));
+  assert.doesNotMatch(h.posts[0].error, /body_read_failed|source_empty/);
+  if (status === 403 || status === 429) {
+    const next = writes.find(value => value.agentNextAt).agentNextAt;
+    assert.ok(next >= before + 1000 && next <= Date.now() + 1000, 'uses configured cooldown, not ordinary job pacing');
+  }
+});
