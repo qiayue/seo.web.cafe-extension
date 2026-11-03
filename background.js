@@ -44,6 +44,9 @@ var AWAKE_MARK = "#gefei-seo-agent"; // 只有带这个记号的标签页，awak
 var AHREFS_QUIET_MS = 4000;     // Ahrefs 页面拿到曲线和文字之后，再这么久没有新数据就算加载完了
 var PAGE_POLL_MS = 1500;        // 打开的网页加载完之后，每隔这么久读一次，正文长度两次一样就算渲染完了
 var PAGE_MAX_MS = 25000;        // 加载完之后最多再等这么久（人机验证页一般几秒内自己跳过去）
+var ACTION_POLL_MS = 3000;      // 点了「请求编入索引」之后，每隔这么久看一次结果
+var ACTION_WAIT_MS = 150000;    // 点完最多等这么久（GSC 先测一遍实际网址，常要一两分钟）
+var ACTION_TIMEOUT_MS = 210000; // 带动作的任务整体上限：加载 + 读 + 点 + 等结果
 
 // ---------- 任务表（storage.session），所有改动串行，免得曲线和相关查询同时到时互相覆盖 ----------
 var queue = Promise.resolve();
@@ -401,6 +404,9 @@ function startPageJob(msg, from) {
   var url = R.normPageUrl(msg.url);
   if (!url) return Promise.reject(new Error("这个网址插件不开（只开 http / https 的公网网址，本机和局域网的不开）：" + String(msg.url || "").slice(0, 80)));
   var origin = new URL(url).origin;
+  // 动作（0.13.0 起，只有「GSC 请求编入索引」一种）：只接对话页发来的，动作和网址都要在白名单里
+  var action = msg.action ? String(msg.action) : "";
+  if (action && (from.agent || from.panel || !R.actionAllowed(action, url))) return Promise.reject(new Error("插件不做这个动作：" + action.slice(0, 40)));
   return chrome.permissions.contains({ origins: [origin + "/*"] }).then(function (ok) {
     if (!ok) return waitForAllow(msg, from, origin, url, "page");
     var host = new URL(url).host;
@@ -410,9 +416,11 @@ function startPageJob(msg, from) {
         return dup ? null : openJob(msg, from, url, {
           noMark: true,
           // minMs：加载完之后至少再等这么久才算读完（GSC 这类一块一块填数据的报告页用，最多 15 秒）
-          fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)), around: from.agent ? String(msg.around || "").slice(0, 100) : "" },
-          label: { keyword: host, range: "打开网页", geo: "" },
+          fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)), around: from.agent ? String(msg.around || "").slice(0, 100) : "",
+            action: action, actionResult: null, actionAt: 0 },
+          label: { keyword: host, range: action ? "请求编入索引" : "打开网页", geo: "" },
           opened: "已在后台打开 " + host + "，等页面加载…",
+          timeoutMs: action ? ACTION_TIMEOUT_MS : undefined,
           onTimeout: function (tabId) { finishPage(tabId, true); },
         });
       });
@@ -446,6 +454,8 @@ function schedulePagePoll(tabId) {
       }).then(function (st) {
         if (!st) return;
         var waited = Date.now() - (st.job.loadedAt || st.job.startedAt);
+        // 要做动作的：页面读完了再动手（没登录就不动手，直接交回去让对话页说「要先登录」）
+        if (st.job.action && (st.stable || waited >= PAGE_MAX_MS) && !(st.page && st.page.login)) return runPageAction(tabId);
         if (st.stable || (st.page && (st.page.login || st.page.canvas) && st.job.polls >= 2) || waited >= PAGE_MAX_MS) return finishPage(tabId, false);
         if (st.job.polls === 1) notify(st.job, "reading", "读到页面了，等它渲染完…");
         schedulePagePoll(tabId);
@@ -453,11 +463,50 @@ function schedulePagePoll(tabId) {
     });
   }, PAGE_POLL_MS);
 }
+/** 页面读完后做那一个动作：先点按钮，再每隔几秒看结果（GSC 要先测一遍实际网址，常常要一两分钟） */
+function runPageAction(tabId) {
+  var exec = function (step) {
+    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.gscIndexAction, args: [step] }).then(function (res) { return (res && res[0] && res[0].result) || { state: "waiting" }; });
+  };
+  var save = function (patch) {
+    return serial(function () {
+      return loadJobs().then(function (jobs) {
+        var j = jobs[tabId]; if (!j) return null;
+        Object.assign(j, patch);
+        return saveJobs(jobs).then(function () { return j; });
+      });
+    });
+  };
+  return save({ actionAt: Date.now() }).then(function (job) {
+    if (!job) return;
+    notify(job, "reading", "找到网址检查结果了，正在点「请求编入索引」…");
+    return exec("click").then(function (r) {
+      if (r.state !== "clicked") return save({ actionResult: r }).then(function () { return finishPage(tabId, false); });
+      notify(job, "reading", "已点「请求编入索引」，GSC 正在测试实际网址（常要一两分钟）…");
+      var check = function () {
+        setTimeout(function () {
+          loadJobs().then(function (jobs) {
+            var j = jobs[tabId]; if (!j) return;
+            exec("check").then(function (c) {
+              var over = Date.now() - j.actionAt >= ACTION_WAIT_MS;
+              if (c.state === "requested" || c.state === "quota" || c.state === "failed" || over) {
+                return save({ actionResult: over && c.state !== "requested" && c.state !== "quota" && c.state !== "failed" ? { state: "timeout", text: "" } : c })
+                  .then(function () { return finishPage(tabId, false); });
+              }
+              check();
+            }, function (e) { save({ actionResult: { state: "failed", text: String((e && e.message) || e).slice(0, 200) } }).then(function () { finishPage(tabId, false); }); });
+          });
+        }, ACTION_POLL_MS);
+      };
+      check();
+    });
+  }, function (e) { return save({ actionResult: { state: "failed", text: String((e && e.message) || e).slice(0, 200) } }).then(function () { return finishPage(tabId, false); }); });
+}
 function finishPage(tabId, timedOut) {
   return loadJobs().then(function (jobs) {
     var job = jobs[tabId];
     if (!job) return;
-    if (job.page) return finish(tabId, { ok: true, data: Object.assign({ kind: "page", url: job.url }, job.page) }, !!(job.page.login || job.page.challenge));
+    if (job.page) return finish(tabId, { ok: true, data: Object.assign({ kind: "page", url: job.url }, job.page, job.action ? { action: job.action, actionResult: job.actionResult || { state: timedOut ? "timeout" : "notrun", text: "" } } : {}) }, !!(job.page.login || job.page.challenge));
     return finish(tabId, { ok: false, error: (timedOut ? (JOB_TIMEOUT_MS / 1000) + " 秒内" : "") + "页面没加载出来——已把那个标签页切到前台，看一眼就知道" }, true);
   });
 }

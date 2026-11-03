@@ -26,5 +26,31 @@ check("读页面的函数能单独序列化进网页执行（不引用外面的�
   assert.ok(!/\bR\.|\bMAX_TEXT\b|\bMAX_HTML\b/.test(src));
   assert.equal(R.extractPage.length, 3);
 });
+check("页面动作只有一种：GSC 网址检查页上「请求编入索引」，别的网址、别的动作一律不做", () => {
+  const ok = "https://search.google.com/search-console/inspect?resource_id=sc-domain%3Apiceditor.ai&id=https%3A%2F%2Fpiceditor.ai%2F";
+  assert.equal(R.actionAllowed("gsc_request_indexing", ok), true);
+  for (const [a, u] of [["gsc_request_indexing", "https://search.google.com/search-console/index?resource_id=x"], ["gsc_request_indexing", "https://evil.com/search-console/inspect?x"],
+    ["gsc_request_indexing", "http://search.google.com/search-console/inspect?x"], ["click", ok], ["", ok], ["toString", ok]]) assert.equal(R.actionAllowed(a, u), false, a + " " + u);
+});
+check("点按钮的函数能单独序列化进网页执行，只点文字正好是「请求编入索引」的那个", () => {
+  const src = R.gscIndexAction.toString();
+  assert.ok(!/\bR\.|\bACTIONS\b|\bGSC_INSPECT_RE\b/.test(src));
+  // 拿一个假页面跑：只有一个按钮的文字对得上
+  const clicked = [];
+  const mk = (t, w = 10) => ({ innerText: t, getBoundingClientRect: () => ({ width: w, height: 10 }), getAttribute: () => null, click: () => clicked.push(t) });
+  const buttons = [mk("TEST LIVE URL"), mk("REQUEST INDEXING", 0), mk("Request indexing"), mk("Request indexing for all pages on this site and more")];
+  global.document = { body: { innerText: "URL is on Google" }, querySelectorAll: () => buttons };
+  assert.deepEqual(R.gscIndexAction("click"), { state: "clicked" });
+  assert.deepEqual(clicked, ["Request indexing"], "看不见的、文字不完全一样的都不点");
+  global.document = { body: { innerText: "Indexing requested URL was added to a priority crawl queue" }, querySelectorAll: () => [] };
+  assert.equal(R.gscIndexAction("check").state, "requested");
+  global.document = { body: { innerText: "Quota exceeded Sorry, we couldn't process this request" }, querySelectorAll: () => [] };
+  assert.equal(R.gscIndexAction("check").state, "quota");
+  global.document = { body: { innerText: "Testing if live URL can be indexed" }, querySelectorAll: () => [] };
+  assert.equal(R.gscIndexAction("check").state, "testing");
+  global.document = { body: { innerText: "URL is not on Google" }, querySelectorAll: () => [] };
+  assert.equal(R.gscIndexAction("click").state, "nobutton");
+  delete global.document;
+});
 console.log(failed ? "\n" + failed + " 项未通过" : "\n全部通过 ✓");
 process.exit(failed ? 1 : 0);

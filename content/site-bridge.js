@@ -49,7 +49,9 @@
       var kind = d.kind === "ahrefs" || d.kind === "page" ? d.kind : undefined;
       chrome.runtime.sendMessage({ type: "trends:fetch", requestId: d.requestId, keyword: d.keyword, geo: d.geo || "", date: d.date, kind: kind,
         target: kind === "ahrefs" ? String(d.target || "") : undefined, url: kind === "page" ? String(d.url || "") : undefined,
-        minMs: kind === "page" ? Number(d.minMs) || 0 : undefined }, function (res) {
+        minMs: kind === "page" ? Number(d.minMs) || 0 : undefined,
+        // action（0.13.0 起）：只有 "gsc_request_indexing"，后台还会按网址再核一遍
+        action: kind === "page" && d.action ? String(d.action).slice(0, 40) : undefined }, function (res) {
         if (chrome.runtime.lastError) {
           var m = chrome.runtime.lastError.message || "";
           if (/context invalidated/i.test(m)) { post({ type: "trends:stale", requestId: d.requestId }); return; }
