@@ -323,6 +323,14 @@ function finish(tabId, result, reveal, cancelled) {
       if (!job) return;
       // 收尾期间可能又收到超限的一页；在串行删除任务之前以最新存储状态判失败。
       if (job.kind === "capture" && job.captureError) result = { ok: false, error: job.captureError };
+      if (job.kind === "capture" && !result.ok) {
+        var seconds = Math.max(0, Math.round((Date.now() - job.startedAt) / 1000));
+        var summary = " [采集摘要：有效响应 " + (job.items || []).length + " 份";
+        if (Number.isFinite(seconds)) summary += "，耗时 " + seconds + " 秒";
+        if (/^[1-9][0-9]?$/.test(String(job.sourceNode || ""))) summary += "，节点 " + job.sourceNode;
+        summary += "，初始重载 " + (job.initialLoadReloads === 1 ? 1 : 0) + " 次]";
+        result = Object.assign({}, result, { error: String(result.error || "采集失败，未提供原因").slice(0, 500 - summary.length) + summary });
+      }
       delete jobs[tabId];
       return saveJobs(jobs).then(function () {
         var at = function (x) { return x ? x - job.startedAt : null; };
@@ -601,6 +609,23 @@ function onCaptureItem(tabId, msg, documentId) {
         if (!((lateStatus === 403 || lateStatus === 429) && (!job.match || new RegExp(job.match).test(String(msg.url || ""))))) return null;
       }
       var url = String(msg.url || "").slice(0, 2000);
+      var target = !job.match || new RegExp(job.match).test(url);
+      if (msg.event === "started") {
+        if (!target) return null;
+        job.targetStarted = (job.targetStarted || 0) + 1;
+        return saveJobs(jobs).then(function () { return null; });
+      }
+      // A known HTTP failure takes precedence over failure to read its body.
+      var bodyHttpFailure = msg.event === "body_read_failed" && Number(msg.status) > 0 && (Number(msg.status) < 200 || Number(msg.status) >= 300);
+      if (target && !bodyHttpFailure && ["network_error", "timeout", "abort", "body_read_failed"].indexOf(msg.event) >= 0) {
+        job.captureError = msg.event === "body_read_failed" ? "[body_read_failed] 已收到目标接口响应，但响应正文读取失败。"
+          : msg.event === "timeout" ? "[request_timeout] 目标接口请求超时，未取得完整响应。"
+          : msg.event === "abort" ? "[request_aborted] 目标接口请求被取消，未取得完整响应。"
+          : "[network_error] 目标接口发生网络错误，未取得 HTTP 响应；具体网络原因未记录。";
+        job.pagerEnd = job.captureError;
+        return saveJobs(jobs).then(function () { return { job: job, stop: job.captureError }; });
+      }
+      if (msg.event && !bodyHttpFailure) return null;
       if (job.seen.length < G.MAX_SEEN) job.seen.push({ url: url, status: Number(msg.status) || 0, ct: String(msg.ct || "").slice(0, 100), size: Number(msg.size) || 0, page: job.pagesDone,
         via: msg.via === "xhr" ? "xhr" : "fetch", method: String(msg.method || "GET").slice(0, 10), reqHeaders: msg.reqHeaders && typeof msg.reqHeaders === "object" ? msg.reqHeaders : {} });
       var body = typeof msg.body === "string" ? msg.body : "";
@@ -616,18 +641,22 @@ function onCaptureItem(tabId, msg, documentId) {
       // 要的那个接口回了 403 / 429：多半是被限流、被拦了。马上停下这张（不硬撞），交回失败，之后歇 30 分钟再领（agentDone）
       var st = Number(msg.status) || 0;
       if ((st === 403 || st === 429) && (!job.match || new RegExp(job.match).test(url)) && !job.throttled) {
-        job.throttled = "接口回了 " + st + "（疑似被限流 / 拦截），已停下，歇 30 分钟再接着干";
+        job.throttled = "[http_error] 目标接口返回 HTTP " + st + (st === 429 ? "（请求过于频繁，疑似被限流）" : "（访问被拒绝，不能据此确定登录过期或限流原因）") + "，已停止采集并暂停接单 30 分钟";
         stop = job.throttled;
         job.pagerEnd = stop;
+      }
+      if (matches && st && (st < 200 || st >= 300) && !job.throttled) {
+        stop = "[http_error] 目标接口请求失败（HTTP " + st + "）。";
+        job.captureError = stop; job.pagerEnd = stop;
       }
       var ex = job.extract && G.EXTRACTORS[job.extract];
       // A matching response with no readable body is not a legitimate Records:[] tail page.
       if (matches && job.extract === "sw_referrals" && !body && !job.captureError && !job.throttled) {
-        stop = "引荐报告响应正文为空或不可读取，保留已有数据。";
+        stop = "[body_unavailable] 已收到目标接口响应（HTTP " + st + "），正文为空或不可读取，保留已有数据。";
         job.captureError = stop;
         job.pagerEnd = stop;
       }
-      if (want && ex && ex.page) {
+      if (want && !stop && ex && ex.page) {
         // 带解析器：先看这一页完不完整（要升级才看得到的列 → 停止翻页、这一页丢掉），完整的当场整理成行，原始数据不留
         var chk = ex.check ? ex.check(body) : { complete: true };
         if (chk && !chk.complete && !job.pagerEnd) {
@@ -639,7 +668,7 @@ function onCaptureItem(tabId, msg, documentId) {
           var parsed = null;
           try { parsed = ex.page(body, url); } catch (e) {
             if (job.extract === "sw_referrals") {
-              stop = "引荐报告页面解析失败，保留已有数据。";
+              stop = "[parse_failed] 引荐报告页面解析失败，保留已有数据。";
               job.captureError = stop;
               job.pagerEnd = stop;
             }
@@ -653,7 +682,7 @@ function onCaptureItem(tabId, msg, documentId) {
             job.bytes += size;
           }
         }
-      } else if (want && job.items.length < job.maxItems && body.length <= G.MAX_ITEM_BODY && job.bytes + body.length <= G.MAX_TOTAL) {
+      } else if (want && !stop && job.items.length < job.maxItems && body.length <= G.MAX_ITEM_BODY && job.bytes + body.length <= G.MAX_TOTAL) {
         first = !job.items.length;
         job.noData = 0;
         job.items.push({ url: url, status: Number(msg.status) || 0, page: job.pagesDone, body: body });
@@ -823,8 +852,10 @@ function finishCapture(tabId, timedOut) {
     if (job.captureError) return finish(tabId, { ok: false, error: job.captureError });
     if (job.loginSeen && !job.items.length) return finish(tabId, { ok: false, error: "要先登录（这个浏览器里没登录 " + new URL(job.url).host + "，或登录过期了）；本次采集已结束" }, true);
     return chrome.tabs.get(tabId).then(function (t) { return t; }, function () { return null; }).then(function (t) {
-      if (!job.items.length && !job.seen.length) {
-        return finish(tabId, { ok: false, error: (timedOut ? "到点了，" : "") + "页面没请求任何数据（可能没加载出来、要登录，或网站改了版）；本次采集已结束" }, true);
+      if (!job.items.length) {
+        var detail = job.targetStarted ? "[target_response_missing] 已观察到目标接口请求，但采集结束前未取得可解析的报告响应。"
+          : "[target_unobserved] 采集结束前未观察到目标报告请求或可解析响应；不能据此判断来源没有数据。";
+        return finish(tabId, { ok: false, error: detail + " 已记录接口响应 " + job.seen.length + " 次。已有数据保留。" }, true);
       }
       var head = { kind: "capture", captured_at: new Date().toISOString(), url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
         pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut };
@@ -837,10 +868,13 @@ function finishCapture(tabId, timedOut) {
           var known = job.items.every(function (it) { return it.parsed && typeof it.parsed.sourceRows === "number"; });
           var sourceRows = known ? job.items.reduce(function (n, it) { return n + it.parsed.sourceRows; }, 0) : null;
           var statuses = Array.from(new Set(job.items.map(function (it) { return Number(it.status) || 0; }))).join("/");
-          var detail = sourceRows === 0 ? "来源 Records 数组为空" : sourceRows > 0 ? "来源 Records 共 " + sourceRows + " 行，但未解析出有效网站" : "未解析出有效网站，旧采集记录未保存来源行数";
-          return finish(tabId, { ok: false, error: "引荐报告没有可入库的网站：" + detail + "（HTTP " + statuses + "，已截取 " + job.items.length + " 页）。保留已有数据；请手动打开来源网站检查。" }, true);
+          var detail = sourceRows === 0 ? "接口返回空数据：网站列表为空（Records 数组为空）" : sourceRows > 0 ? "来源 Records 共 " + sourceRows + " 行，但未解析出有效网站" : "未解析出有效网站，旧采集记录未保存来源行数";
+          var period = x.period || {}, range = "";
+          if (/^\d{4}[|-]\d{2}[|-]\d{2}$/.test(period.from || "") && /^\d{4}[|-]\d{2}[|-]\d{2}$/.test(period.to || "")) range = "接口日期 " + period.from + " 至 " + period.to + "；";
+          if (period.latest === "28d") range += "接口窗口 28d；";
+          return finish(tabId, { ok: false, error: (sourceRows === 0 ? "[source_empty] " : "[rows_unusable] ") + detail + "（HTTP " + statuses + "，已截取 " + job.items.length + " 份响应）。" + range + "本次未入库，已有数据保留。" }, true);
         }
-        if (!x.rows.length) return finish(tabId, { ok: false, error: "页面没请求到要的数据（截到 " + job.items.length + " 段，整理出 0 行）——可能要登录、没有数据，或网站改了版；本次采集已结束" }, true);
+        if (!x.rows.length) return finish(tabId, { ok: false, error: "[rows_unusable] 已采集 " + job.items.length + " 份目标响应，但未解析出有效记录。本次未入库；请核对来源内容及解析格式。" }, true);
         return finish(tabId, { ok: true, data: Object.assign(head, { extract: job.extract }, x) });
       }
       return finish(tabId, { ok: true, data: Object.assign(head, { items: job.items, seen: job.seen }) });
@@ -976,9 +1010,9 @@ function agentDone(requestId, result) {
   }).then(function (pace) {
     // 两张任务之间随机隔一会儿（不规律，像人）；疑似被限流就歇 30 分钟。到点由每分钟的闹钟领下一张
     var H = G.paceOf(pace);
-    var throttled = !body.ok && /疑似被限流/.test(body.error);
+    var throttled = !body.ok && (/疑似被限流/.test(body.error) || /\[http_error\].*HTTP 403/.test(body.error));
     var gap = throttled ? THROTTLE_COOLDOWN_MS : G.rand(H.betweenJobsMs[0], H.betweenJobsMs[1]);
-    if (throttled) agentStatus({ error: "Similarweb 疑似限流，插件歇 30 分钟再接着干", at: Date.now() });
+    if (throttled) agentStatus({ error: "Similarweb 返回访问拒绝或限流响应，插件暂停接单 30 分钟", at: Date.now() });
     return chrome.storage.session.set({ agentNextAt: Date.now() + gap }).then(function () {
       setTimeout(function () { agentPoll(false); }, gap + 500); // 后台被浏览器收了也没关系，每分钟的闹钟会接着领
     });

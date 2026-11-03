@@ -37,7 +37,7 @@
   function record(url, status, ct, body, meta) {
     if (state === false) return;
     var d = { source: "gefei-seo-capture", url: String(url).slice(0, 2000), status: status, ct: String(ct || "").slice(0, 100), size: body ? body.length : 0,
-      via: meta && meta.via, method: meta && meta.method, reqHeaders: meta && meta.headers };
+      event: meta && meta.event, via: meta && meta.via, method: meta && meta.method, reqHeaders: meta && meta.headers };
     if (body && /json/i.test(ct || "")) {
       if (body.length <= MAX_BODY) d.body = body;
       else d.captureError = "数据量到上限（原始响应正文过大），停止采集";
@@ -55,11 +55,12 @@
           var init = arguments[1] || {};
           var meta = { via: "fetch", method: String(init.method || (input && input.method) || "GET").toUpperCase(),
             headers: headerObj(init.headers || (input && typeof input === "object" && input.headers)) };
+          record(url, 0, "", "", Object.assign({}, meta, { event: "started" }));
           p.then(function (res) {
             var ct = res.headers.get("content-type") || "";
             if (!/json/i.test(ct)) { record(res.url || url, res.status, ct, "", meta); return; }
-            res.clone().text().then(function (body) { record(res.url || url, res.status, ct, body, meta); }, function () {});
-          }, function () {});
+            res.clone().text().then(function (body) { record(res.url || url, res.status, ct, body, meta); }, function () { record(res.url || url, res.status, ct, "", Object.assign({}, meta, { event: "body_read_failed" })); });
+          }, function (error) { record(url, 0, "", "", Object.assign({}, meta, { event: error && error.name === "AbortError" ? "abort" : error && error.name === "TimeoutError" ? "timeout" : "network_error" })); });
         }
       } catch (e) {}
       return p;
@@ -77,13 +78,18 @@
   XMLHttpRequest.prototype.send = function () {
     var xhr = this;
     if (state !== false && sameSite(xhr.__gefeiCapUrl)) {
+      var meta = { via: "xhr", method: xhr.__gefeiCapMethod };
+      record(xhr.__gefeiCapUrl, 0, "", "", Object.assign({}, meta, { event: "started" }));
+      ["error", "timeout", "abort"].forEach(function (type) {
+        xhr.addEventListener(type, function () { record(xhr.__gefeiCapUrl, 0, "", "", Object.assign({}, meta, { event: type === "error" ? "network_error" : type })); });
+      });
       xhr.addEventListener("load", function () {
         try {
           var ct = xhr.getResponseHeader("content-type") || "";
           var body = !/json/i.test(ct) ? "" : xhr.responseType === "" || xhr.responseType === "text" ? xhr.responseText
             : xhr.responseType === "json" ? JSON.stringify(xhr.response) : "";
           record(xhr.responseURL || xhr.__gefeiCapUrl, xhr.status, ct, body, { via: "xhr", method: xhr.__gefeiCapMethod, headers: headerObj(xhr.__gefeiCapHeaders) });
-        } catch (e) {}
+        } catch (e) { record(xhr.__gefeiCapUrl, xhr.status, "", "", Object.assign({}, meta, { event: "body_read_failed" })); }
       });
     }
     return sendXhr.apply(this, arguments);

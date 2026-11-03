@@ -158,7 +158,7 @@ async function hookedResponse(body, via = "xhr", url = apiUrl, ct = "application
   const bridgeWindow = { addEventListener: (type, fn) => { receive = fn; }, postMessage() {} };
   const chrome = { runtime: { sendMessage: (msg, callback) => { if (msg.type === "capture:hello") callback({ job: true }); else if (msg.type === "capture:item") forwarded = msg; } } };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../content/capture-bridge.js"), "utf8"), { window: bridgeWindow, chrome, location: { origin: "https://sim.3ue.com" }, setTimeout() {} });
-  receive({ source: bridgeWindow, origin: "https://sim.3ue.com", data: events[0] });
+  receive({ source: bridgeWindow, origin: "https://sim.3ue.com", data: events.find(event => event.event !== "started") });
   assert.equal(forwarded.type, "capture:item");
   return forwarded;
 }
@@ -185,7 +185,7 @@ for (const via of ['xhr', 'fetch']) for (const status of [200, 500]) test(`empty
   assert.equal(event.body, null);
   await h.context.onCaptureItem(7, event);
   assert.equal(h.posts.length, 1); assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
-  assert.match(h.posts[0].error, /正文为空或不可读取/);
+  assert.match(h.posts[0].error, status === 200 ? /正文为空或不可读取/ : /http_error.*HTTP 500/);
   await h.context.finishCapture(7, false);
   assert.equal(h.posts.length, 1, 'a later normal finish must not upload stale partial rows');
 });
@@ -193,7 +193,7 @@ test('a matching non-JSON response is unavailable data, not the end of a referra
   const h = harness(); await h.page(1, rows(1));
   await h.context.onCaptureItem(7, await hookedResponse('<html>source error</html>', 'xhr', apiUrl, 'text/html', 500));
   assert.equal(h.posts[0].ok, false); assert.equal(h.posts[0].data, null);
-  assert.match(h.posts[0].error, /正文为空或不可读取/);
+  assert.match(h.posts[0].error, /http_error.*HTTP 500/);
   assert.doesNotMatch(h.posts[0].error, /source error/);
 });
 test('unrelated empty responses do not discard valid zero visits or a legitimate empty tail', async () => {
@@ -214,4 +214,55 @@ test('empty landing-page responses retain existing task handling', async () => {
   const h = harness({ extract: 'sw_landing' });
   await h.context.onCaptureItem(7, await hookedResponse(''));
   assert.equal(h.posts.length, 0); assert.equal(h.job().captureError, undefined);
+});
+
+for (const status of [401, 404, 500, 503]) test(`HTTP ${status} with valid-looking Records cannot become empty-source or success`, async () => {
+  const h = harness();
+  await h.context.onCaptureItem(7, { url: apiUrl, status, body: JSON.stringify({Records: [{Domain:'wrong.test'}]}) });
+  assert.equal(h.posts[0].ok, false); assert.match(h.posts[0].error, new RegExp('http_error.*HTTP '+status));
+  assert.equal(h.posts[0].data, null);
+});
+for (const event of ['network_error','timeout','abort','body_read_failed']) test(`target ${event} is distinct and rejects partial report`, async () => {
+  const h = harness(); await h.page(1, rows(1));
+  await h.context.onCaptureItem(7, {url:apiUrl,event,status:0});
+  assert.equal(h.posts[0].ok,false); assert.equal(h.posts[0].data,null);
+  assert.doesNotMatch(h.posts[0].error,/Records|没有数据/);
+});
+test('request start is not counted as response or mistaken for unreadable body',async()=>{
+ const h=harness(); await h.context.onCaptureItem(7,{url:apiUrl,event:'started',status:0});
+ assert.equal(h.posts.length,0); assert.equal(h.job().seen.length,0); assert.equal(h.job().targetStarted,1);
+ await h.context.finishCapture(7,true); assert.match(h.posts[0].error,/target_response_missing/);
+});
+test('unrelated responses do not prove target was sent',async()=>{
+ const h=harness(); await h.context.onCaptureItem(7,{url:'https://sim.3ue.com/other',status:200,body:'{}'});
+ await h.context.finishCapture(7,true); assert.match(h.posts[0].error,/target_unobserved/);
+});
+test('final failure summary survives legacy wire format without source URLs or secrets',async()=>{
+ const h=harness({toAgent:true,startedAt:Date.now()-1000,sourceNode:'4',initialLoadReloads:1,url:'https://sim.3ue.com/?secret=must-not-leak'});
+ h.context.logActivity=()=>{};h.context.chrome.tabs.remove=async()=>{};
+ vm.runInNewContext(backgroundFunction('finish','function okResult('),h.context);
+ await h.context.finish(7,{ok:false,error:'[network_error] 目标接口发生网络错误'});
+ assert.match(h.posts[0].error,/节点 4/);assert.match(h.posts[0].error,/初始重载 1 次/);
+ assert.ok(h.posts[0].error.length<=500);assert.equal(h.posts[0].data,null);
+ assert.doesNotMatch(JSON.stringify(h.posts[0]),/secret|must-not-leak|https:/);
+});
+
+for (const status of [403, 429, 500]) for (const retired of [false, true]) test(`unreadable HTTP ${status} body preserves HTTP handling, retired=${retired}`, async () => {
+  const h = harness(retired ? { ignoredDocumentId: 'old-document' } : {});
+  const writes = [];
+  h.context.chrome.storage.session.set = async value => writes.push(value);
+  const before = Date.now();
+  await h.context.onCaptureItem(7, { url: apiUrl, event: 'body_read_failed', status }, retired ? 'old-document' : 'current-document');
+  if (retired && status === 500) {
+    assert.equal(h.posts.length, 0, 'ordinary stale failures remain ignored');
+    return;
+  }
+  assert.equal(h.posts[0].ok, false);
+  assert.equal(h.posts[0].data, null);
+  assert.match(h.posts[0].error, new RegExp('http_error.*HTTP ' + status));
+  assert.doesNotMatch(h.posts[0].error, /body_read_failed|source_empty/);
+  if (status === 403 || status === 429) {
+    const next = writes.find(value => value.agentNextAt).agentNextAt;
+    assert.ok(next >= before + 1000 && next <= Date.now() + 1000, 'uses configured cooldown, not ordinary job pacing');
+  }
 });
