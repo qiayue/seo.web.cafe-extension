@@ -119,3 +119,17 @@ for(const kind of ['capture','fetch'])test(kind+': disabling node mode keeps the
 test('missing site permission only opens the original allow flow',async()=>{
   const h=harness({permission:false});await h.start();assert.equal(h.prepares,0);assert.deepEqual(h.events,['allow']);
 });
+
+for(const kind of ['capture','fetch'])for(const ok of [true,false])test(kind+': remote finalization closes the task tab even when reveal is requested, ok='+ok,async()=>{
+  const h=harness({realFinish:true});await h.start({kind});await flush();
+  const actions=[];
+  h.jobs[44].foregroundAt=1000;
+  h.context.chrome.tabs.update=async(id,opts)=>{actions.push({id,active:opts.active});throw Error('original tab already closed')};
+  h.context.chrome.tabs.remove=async id=>{actions.push({removed:id})};
+  await h.context.finish(44,{ok,data:ok?{}:null,error:ok?'':'no data'},true);
+  assert.deepEqual(actions,[{id:900,active:true},{removed:44}]);
+  assert.deepEqual(Object.keys(h.jobs),[]);
+  assert.equal(h.posts.length,1);assert.equal(h.posts[0].ok,ok);
+  await h.context.finish(44,{ok:false,error:'late timeout'},true);
+  assert.equal(actions.length,2);assert.equal(h.posts.length,1);
+});

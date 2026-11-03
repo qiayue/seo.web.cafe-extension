@@ -315,7 +315,7 @@ function toForeground(tabId) {
   });
 }
 
-/** 结束一个任务：结果送回对话页。成功就关掉谷歌趋势标签页；失败就把它切到前台让用户看见（多半是要人机验证） */
+/** 结束一个任务：远程接单任务无论成败都关页；交互任务失败时可留在前台供用户检查。 */
 function finish(tabId, result, reveal, cancelled) {
   return serial(function () {
     return loadJobs().then(function (jobs) {
@@ -342,13 +342,12 @@ function finish(tabId, result, reveal, cancelled) {
             : job.kind === "fetch" ? "请求完了（" + ((result.data && result.data.results) || []).length + " 个接口）" : job.kind === "page" ? "读到了（正文 " + ((result.data && result.data.textChars) || 0) + " 字）" : job.kind === "ahrefs" ? "读到了（" + ((result.data && result.data.series) || []).length + " 条曲线、" + Object.keys((result.data && result.data.metrics) || {}).length + " 个指标）"
             : "取到了（" + ((result.data && result.data.points) || []).length + " 个点）" });
         if (result.ok && job.keepTab) chrome.tabs.update(tabId, { active: true }).catch(function () {});
-        else if (result.ok || cancelled) {
+        else if (result.ok || cancelled || job.toAgent) {
           // 被切到过前台的：先切回原来那个标签页，再关（直接关的话浏览器会跳到旁边随便一个标签页）
           var back = job.foregroundAt && job.returnTabId ? chrome.tabs.update(job.returnTabId, { active: true }).catch(function () {}) : Promise.resolve();
-          back.then(function () { chrome.tabs.remove(tabId).catch(function () {}); });
+          return back.then(function () { return chrome.tabs.remove(tabId).catch(function () {}); });
         }
         else if (reveal) chrome.tabs.update(tabId, { active: true }).catch(function () {});
-        else if (job.toAgent) chrome.tabs.remove(tabId).catch(function () {}); // 远程任务没人看着：没取到也关掉，别攒一堆标签页
       });
     });
   });
@@ -572,7 +571,7 @@ function startRemoteJob(msg, from) {
                 : { kind: "fetch", origin: origin, requests: msg.requests, delayMs: msg.delayMs, transport: msg.transport === "xhr" ? "xhr" : "fetch", fetching: false },
               label: { keyword: host, range: capture ? "截数据" + (msg.pager ? "（翻页）" : "") : "请求接口 ×" + msg.requests.length, geo: "" },
               opened: "已在后台打开 " + host + "，等页面加载…",
-              onTimeout: function (tabId) { if (capture) finishCapture(tabId, true); else finish(tabId, { ok: false, error: Math.round((msg.timeoutMs || JOB_TIMEOUT_MS) / 1000) + " 秒内没请求完——已把那个标签页切到前台，看一眼就知道" }, true); },
+              onTimeout: function (tabId) { if (capture) finishCapture(tabId, true); else finish(tabId, { ok: false, error: Math.round((msg.timeoutMs || JOB_TIMEOUT_MS) / 1000) + " 秒内没请求完；本次采集已结束" }, true); },
             });
           });
         }).catch(function (e) {
@@ -822,10 +821,10 @@ function finishCapture(tabId, timedOut) {
     if (!job) return;
     // 体积或响应校验提前结束不能把前几页当作成功报告回传，持久化后再次收尾也一样。
     if (job.captureError) return finish(tabId, { ok: false, error: job.captureError });
-    if (job.loginSeen && !job.items.length) return finish(tabId, { ok: false, error: "要先登录（这个浏览器里没登录 " + new URL(job.url).host + "，或登录过期了）——已把那个标签页切到前台" }, true);
+    if (job.loginSeen && !job.items.length) return finish(tabId, { ok: false, error: "要先登录（这个浏览器里没登录 " + new URL(job.url).host + "，或登录过期了）；本次采集已结束" }, true);
     return chrome.tabs.get(tabId).then(function (t) { return t; }, function () { return null; }).then(function (t) {
       if (!job.items.length && !job.seen.length) {
-        return finish(tabId, { ok: false, error: (timedOut ? "到点了，" : "") + "页面没请求任何数据（可能没加载出来、要登录，或网站改了版）——已把那个标签页切到前台" }, true);
+        return finish(tabId, { ok: false, error: (timedOut ? "到点了，" : "") + "页面没请求任何数据（可能没加载出来、要登录，或网站改了版）；本次采集已结束" }, true);
       }
       var head = { kind: "capture", captured_at: new Date().toISOString(), url: job.url, finalUrl: (t && t.url) || "", title: (t && t.title) || "", pages: job.pagesDone + 1,
         pagerEnd: job.pagerEnd || (job.pager && job.pagesDone >= job.pager.times ? "翻够了" : ""), timedOut: !!timedOut };
@@ -839,9 +838,9 @@ function finishCapture(tabId, timedOut) {
           var sourceRows = known ? job.items.reduce(function (n, it) { return n + it.parsed.sourceRows; }, 0) : null;
           var statuses = Array.from(new Set(job.items.map(function (it) { return Number(it.status) || 0; }))).join("/");
           var detail = sourceRows === 0 ? "来源 Records 数组为空" : sourceRows > 0 ? "来源 Records 共 " + sourceRows + " 行，但未解析出有效网站" : "未解析出有效网站，旧采集记录未保存来源行数";
-          return finish(tabId, { ok: false, error: "引荐报告没有可入库的网站：" + detail + "（HTTP " + statuses + "，已截取 " + job.items.length + " 页）。保留已有数据；请检查已打开的任务页面。" }, true);
+          return finish(tabId, { ok: false, error: "引荐报告没有可入库的网站：" + detail + "（HTTP " + statuses + "，已截取 " + job.items.length + " 页）。保留已有数据；请手动打开来源网站检查。" }, true);
         }
-        if (!x.rows.length) return finish(tabId, { ok: false, error: "页面没请求到要的数据（截到 " + job.items.length + " 段，整理出 0 行）——可能要登录、没有数据，或网站改了版；已把那个标签页切到前台" }, true);
+        if (!x.rows.length) return finish(tabId, { ok: false, error: "页面没请求到要的数据（截到 " + job.items.length + " 段，整理出 0 行）——可能要登录、没有数据，或网站改了版；本次采集已结束" }, true);
         return finish(tabId, { ok: true, data: Object.assign(head, { extract: job.extract }, x) });
       }
       return finish(tabId, { ok: true, data: Object.assign(head, { items: job.items, seen: job.seen }) });
@@ -867,7 +866,7 @@ function runFetch(tabId) {
     }).then(function (res) {
       var results = (res && res[0] && res[0].result) || [];
       var okN = results.filter(function (r) { return r.status >= 200 && r.status < 300; }).length;
-      if (!okN) return finish(tabId, { ok: false, error: "接口全都没请求成功（" + results.map(function (r) { return r.status || r.error; }).slice(0, 5).join("、") + "）——多半要登录，已把那个标签页切到前台" }, true);
+      if (!okN) return finish(tabId, { ok: false, error: "接口全都没请求成功（" + results.map(function (r) { return r.status || r.error; }).slice(0, 5).join("、") + "）——多半要登录；本次采集已结束" }, true);
       return finish(tabId, { ok: true, data: { kind: "fetch", url: job.url, results: results } });
     }, function (e) {
       return finish(tabId, { ok: false, error: "没请求成：" + String((e && e.message) || e).slice(0, 160) }, true);
