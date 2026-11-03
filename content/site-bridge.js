@@ -51,7 +51,9 @@
         target: kind === "ahrefs" ? String(d.target || "") : undefined, url: kind === "page" ? String(d.url || "") : undefined,
         minMs: kind === "page" ? Number(d.minMs) || 0 : undefined,
         // action（0.13.0 起）：只有 "gsc_request_indexing"，后台还会按网址再核一遍
-        action: kind === "page" && d.action ? String(d.action).slice(0, 40) : undefined }, function (res) {
+        action: kind === "page" && d.action ? String(d.action).slice(0, 40) : undefined,
+        // show（0.14.0 起）：演示模式（字幕 / 第几幕 / 停留多久），后台还会按网址再核一遍
+        show: kind === "page" && d.show && typeof d.show === "object" ? { caption: String(d.show.caption || "").slice(0, 160), title: String(d.show.title || "").slice(0, 30), step: Number(d.show.step) || 1, total: Number(d.show.total) || 0, holdMs: Number(d.show.holdMs) || 0 } : undefined }, function (res) {
         if (chrome.runtime.lastError) {
           var m = chrome.runtime.lastError.message || "";
           if (/context invalidated/i.test(m)) { post({ type: "trends:stale", requestId: d.requestId }); return; }
