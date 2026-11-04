@@ -44,6 +44,11 @@ var AWAKE_MARK = "#gefei-seo-agent"; // 只有带这个记号的标签页，awak
 var AHREFS_QUIET_MS = 4000;     // Ahrefs 页面拿到曲线和文字之后，再这么久没有新数据就算加载完了
 var PAGE_POLL_MS = 1500;        // 打开的网页加载完之后，每隔这么久读一次，正文长度两次一样就算渲染完了
 var PAGE_MAX_MS = 25000;        // 加载完之后最多再等这么久（人机验证页一般几秒内自己跳过去）
+var ACTION_POLL_MS = 3000;      // 点了「请求编入索引」之后，每隔这么久看一次结果
+var ACTION_WAIT_MS = 150000;    // 点完最多等这么久（GSC 先测一遍实际网址，常要一两分钟）
+var ACTION_TIMEOUT_MS = 210000; // 带动作的任务整体上限：加载 + 读 + 点 + 等结果
+var SHOW_MAX_MS = 60000;        // 演示模式：加载完最多等这么久（站点出词要等查询结果出来）
+var SHOW_TIMEOUT_MS = 120000;   // 演示模式整体上限：加载 + 等结果 + 演一会儿
 
 // ---------- 任务表（storage.session），所有改动串行，免得曲线和相关查询同时到时互相覆盖 ----------
 var queue = Promise.resolve();
@@ -228,7 +233,7 @@ function openJob(msg, from, url, spec) {
     if (spec.checkCancelled) spec.checkCancelled();
     var winId = from.tab ? from.tab.windowId : (Number.isInteger(msg.windowId) ? msg.windowId : undefined);
     // 记号只给谷歌趋势 / Ahrefs：随便一个网页加上 #记号，靠 # 分页面的单页应用会被带错页
-    var opts = { url: url + (spec.noMark ? "" : AWAKE_MARK), active: !!(from.panel && msg.foreground) }; // 侧边栏可选「前台打开」，排查慢的时候对照用
+    var opts = { url: url + (spec.noMark ? "" : AWAKE_MARK), active: !!(spec.active || (from.panel && msg.foreground)) }; // 侧边栏可选「前台打开」，排查慢的时候对照用；演示模式一律前台
     if (winId !== undefined) opts.windowId = winId;
     if (from.tab) opts.index = from.tab.index + 1;
     // 取完要切回哪个标签页：对话页发起的切回对话页；侧边栏发起的切回发起时正看着的那个
@@ -268,7 +273,7 @@ function openJob(msg, from, url, spec) {
               if (!r || !r.ok) throw new Error("capture not armed");
             }) : Promise.resolve()).then(function () {
             if (spec.checkCancelled) spec.checkCancelled();
-            return chrome.tabs.update(tab.id, { url: opts.url });
+            return chrome.tabs.update(tab.id, spec.active ? { url: opts.url, active: true } : { url: opts.url });
           }).catch(function () { finish(tab.id, { ok: false, error: "无法打开已选节点的报告。" }); });
           logActivity(msg.requestId, Object.assign({ from: fromLabel(from), stage: "opened", text: spec.opened }, spec.label));
           if (!spec.noForeground) setTimeout(function () { toForeground(tab.id); }, FOREGROUND_AFTER_MS);
@@ -408,19 +413,32 @@ function startPageJob(msg, from) {
   var url = R.normPageUrl(msg.url);
   if (!url) return Promise.reject(new Error("这个网址插件不开（只开 http / https 的公网网址，本机和局域网的不开）：" + String(msg.url || "").slice(0, 80)));
   var origin = new URL(url).origin;
+  // 动作（0.13.0 起，只有「GSC 请求编入索引」一种）：只接对话页发来的，动作和网址都要在白名单里
+  var action = msg.action ? String(msg.action) : "";
+  if (action && (from.agent || from.panel || !R.actionAllowed(action, url))) return Promise.reject(new Error("插件不做这个动作：" + action.slice(0, 40)));
+  // 演示模式（0.14.0 起）：只接对话页发来的、只演谷歌搜索和站点出词；同一个演示标签页一直用、放在前台、读完不关
+  var show = msg.show ? R.normShow(msg.show) : null;
+  if (show && (from.agent || from.panel || !R.showAllowed(url))) return Promise.reject(new Error("插件只演示谷歌搜索和 seo.web.cafe/sitekw 两种页面"));
   return chrome.permissions.contains({ origins: [origin + "/*"] }).then(function (ok) {
     if (!ok) return waitForAllow(msg, from, origin, url, "page");
     var host = new URL(url).host;
     return serial(function () {
       return loadJobs().then(function (jobs) {
         var dup = Object.keys(jobs).some(function (k) { return jobs[k].requestId === msg.requestId; });
-        return dup ? null : openJob(msg, from, url, {
-          noMark: true,
-          // minMs：加载完之后至少再等这么久才算读完（GSC 这类一块一块填数据的报告页用，最多 15 秒）
-          fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)), around: from.agent ? String(msg.around || "").slice(0, 100) : "" },
-          label: { keyword: host, range: "打开网页", geo: "" },
-          opened: "已在后台打开 " + host + "，等页面加载…",
-          onTimeout: function (tabId) { finishPage(tabId, true); },
+        if (dup) return null;
+        return (show ? demoTab(jobs) : Promise.resolve(null)).then(function (reuseTabId) {
+          return openJob(msg, from, url, {
+            noMark: true,
+            // minMs：加载完之后至少再等这么久才算读完（GSC 这类一块一块填数据的报告页用，最多 15 秒）
+            fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)), around: from.agent ? String(msg.around || "").slice(0, 100) : "",
+              action: action, actionResult: null, actionAt: 0,
+              show: show, shown: false, waitFor: show ? R.showWaitFor(url) : "", keepTab: !!show, maxMs: show ? SHOW_MAX_MS : 0 },
+            active: !!show, noForeground: !!show, preparedTabId: reuseTabId || undefined,
+            label: { keyword: host, range: action ? "请求编入索引" : show ? "演示" : "打开网页", geo: "" },
+            opened: show ? "演示：已在前台打开 " + host + "…" : "已在后台打开 " + host + "，等页面加载…",
+            timeoutMs: action ? ACTION_TIMEOUT_MS : show ? SHOW_TIMEOUT_MS : undefined,
+            onTimeout: function (tabId) { finishPage(tabId, true); },
+          }).then(function (r) { if (show) rememberDemoTab(url); return r; });
         });
       });
     });
@@ -432,7 +450,7 @@ function schedulePagePoll(tabId) {
     loadJobs().then(function (jobs) {
       var job = jobs[tabId];
       if (!job || job.kind !== "page") return;
-      chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.extractPage, args: [R.MAX_TEXT, R.MAX_HTML, job.around || ""] }).then(function (res) {
+      chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.extractPage, args: [R.MAX_TEXT, R.MAX_HTML, job.around || "", job.waitFor || ""] }).then(function (res) {
         var page = res && res[0] && res[0].result;
         return serial(function () {
           return loadJobs().then(function (jobs2) {
@@ -453,18 +471,96 @@ function schedulePagePoll(tabId) {
       }).then(function (st) {
         if (!st) return;
         var waited = Date.now() - (st.job.loadedAt || st.job.startedAt);
-        if (st.stable || (st.page && (st.page.login || st.page.canvas) && st.job.polls >= 2) || waited >= PAGE_MAX_MS) return finishPage(tabId, false);
+        // 演示模式：读完了先演一会儿（字幕 + 高亮 + 慢慢滚），再交回去
+        if (st.job.show && !st.job.shown && (st.stable || waited >= (st.job.maxMs || PAGE_MAX_MS))) return runShow(tabId);
+        // 要做动作的：页面读完了再动手（没登录就不动手，直接交回去让对话页说「要先登录」）
+        if (st.job.action && (st.stable || waited >= PAGE_MAX_MS) && !(st.page && st.page.login)) return runPageAction(tabId);
+        if (st.stable || (st.page && (st.page.login || st.page.canvas) && st.job.polls >= 2) || waited >= (st.job.maxMs || PAGE_MAX_MS)) return finishPage(tabId, false);
         if (st.job.polls === 1) notify(st.job, "reading", "读到页面了，等它渲染完…");
         schedulePagePoll(tabId);
       });
     });
   }, PAGE_POLL_MS);
 }
+// ---------- 演示模式（0.14.0 起） ----------
+/** 演示用的那个标签页：上一步开的还在、而且没有任务在用，就接着用它（一部电影一个窗口）；否则新开 */
+function demoTab(jobs) {
+  return chrome.storage.session.get("demoTabId").then(function (r) {
+    var id = r && r.demoTabId;
+    if (!Number.isInteger(id) || jobs[id]) return null;
+    return chrome.tabs.get(id).then(function (t) { return t && !t.discarded ? t.id : null; }, function () { return null; });
+  }, function () { return null; });
+}
+/** 记下演示标签页（按网址找刚开的那个任务） */
+function rememberDemoTab(url) {
+  return loadJobs().then(function (jobs) {
+    var k = Object.keys(jobs).find(function (x) { return jobs[x].show && jobs[x].url === url; });
+    if (k) return chrome.storage.session.set({ demoTabId: Number(k) });
+  }).catch(function () {});
+}
+/** 读完了：在页面上放字幕、高亮结果、慢慢往下滚，停留 holdMs 再交回（页面留在前台，下一幕接着用这个标签页） */
+function runShow(tabId) {
+  return serial(function () {
+    return loadJobs().then(function (jobs) {
+      var j = jobs[tabId]; if (!j || j.shown) return null;
+      j.shown = true;
+      return saveJobs(jobs).then(function () { return j; });
+    });
+  }).then(function (job) {
+    if (!job) return;
+    var sh = job.show || {};
+    chrome.tabs.update(tabId, { active: true }).catch(function () {});
+    notify(job, "reading", "正在演示：" + String(sh.caption || "").slice(0, 40));
+    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.showStage, args: [sh.caption || "", sh.title || "", sh.step || 1, sh.total || 0, sh.holdMs || 8000] })
+      .catch(function () {})
+      .then(function () { setTimeout(function () { finishPage(tabId, false); }, sh.holdMs || 8000); });
+  });
+}
+
+/** 页面读完后做那一个动作：先点按钮，再每隔几秒看结果（GSC 要先测一遍实际网址，常常要一两分钟） */
+function runPageAction(tabId) {
+  var exec = function (step) {
+    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.gscIndexAction, args: [step] }).then(function (res) { return (res && res[0] && res[0].result) || { state: "waiting" }; });
+  };
+  var save = function (patch) {
+    return serial(function () {
+      return loadJobs().then(function (jobs) {
+        var j = jobs[tabId]; if (!j) return null;
+        Object.assign(j, patch);
+        return saveJobs(jobs).then(function () { return j; });
+      });
+    });
+  };
+  return save({ actionAt: Date.now() }).then(function (job) {
+    if (!job) return;
+    notify(job, "reading", "找到网址检查结果了，正在点「请求编入索引」…");
+    return exec("click").then(function (r) {
+      if (r.state !== "clicked") return save({ actionResult: r }).then(function () { return finishPage(tabId, false); });
+      notify(job, "reading", "已点「请求编入索引」，GSC 正在测试实际网址（常要一两分钟）…");
+      var check = function () {
+        setTimeout(function () {
+          loadJobs().then(function (jobs) {
+            var j = jobs[tabId]; if (!j) return;
+            exec("check").then(function (c) {
+              var over = Date.now() - j.actionAt >= ACTION_WAIT_MS;
+              if (c.state === "requested" || c.state === "quota" || c.state === "failed" || over) {
+                return save({ actionResult: over && c.state !== "requested" && c.state !== "quota" && c.state !== "failed" ? { state: "timeout", text: "" } : c })
+                  .then(function () { return finishPage(tabId, false); });
+              }
+              check();
+            }, function (e) { save({ actionResult: { state: "failed", text: String((e && e.message) || e).slice(0, 200) } }).then(function () { finishPage(tabId, false); }); });
+          });
+        }, ACTION_POLL_MS);
+      };
+      check();
+    });
+  }, function (e) { return save({ actionResult: { state: "failed", text: String((e && e.message) || e).slice(0, 200) } }).then(function () { return finishPage(tabId, false); }); });
+}
 function finishPage(tabId, timedOut) {
   return loadJobs().then(function (jobs) {
     var job = jobs[tabId];
     if (!job) return;
-    if (job.page) return finish(tabId, { ok: true, data: Object.assign({ kind: "page", url: job.url }, job.page) }, !!(job.page.login || job.page.challenge));
+    if (job.page) return finish(tabId, { ok: true, data: Object.assign({ kind: "page", url: job.url }, job.page, job.action ? { action: job.action, actionResult: job.actionResult || { state: timedOut ? "timeout" : "notrun", text: "" } } : {}) }, !!(job.page.login || job.page.challenge));
     return finish(tabId, { ok: false, error: (timedOut ? (JOB_TIMEOUT_MS / 1000) + " 秒内" : "") + "页面没加载出来——已把那个标签页切到前台，看一眼就知道" }, true);
   });
 }
