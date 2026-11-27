@@ -49,6 +49,12 @@ var ACTION_WAIT_MS = 150000;    // 点完最多等这么久（GSC 先测一遍�
 var ACTION_TIMEOUT_MS = 210000; // 带动作的任务整体上限：加载 + 读 + 点 + 等结果
 var SHOW_MAX_MS = 60000;        // 演示模式：加载完最多等这么久（站点出词要等查询结果出来）
 var SHOW_TIMEOUT_MS = 120000;   // 演示模式整体上限：加载 + 等结果 + 演一会儿
+// 网址检查先在 GSC 首页搜索框里输入网址（0.15.0 起，见 lib/page-read.js gscInspectSearch）：
+// 填完 1 秒回车；5 秒还没跳就点下拉第一项；9 秒点旁边的搜索按钮；13 秒再回车一次；25 秒还没跳到检查页就算失败，把页面结构带回去
+var INSPECT_BOX_WAIT_MS = 20000; // 首页加载完之后最多等这么久找搜索框
+var INSPECT_STEPS = [[1000, "enter"], [5000, "option"], [9000, "button"], [13000, "enter"]];
+var INSPECT_GIVEUP_MS = 25000;
+var INSPECT_TIMEOUT_MS = 100000; // 只读不点的网址检查整体上限：首页 + 搜索 + 结果页
 
 // ---------- 任务表（storage.session），所有改动串行，免得曲线和相关查询同时到时互相覆盖 ----------
 var queue = Promise.resolve();
@@ -415,7 +421,10 @@ function startPageJob(msg, from) {
   var origin = new URL(url).origin;
   // 动作（0.13.0 起，只有「GSC 请求编入索引」一种）：只接对话页发来的，动作和网址都要在白名单里
   var action = msg.action ? String(msg.action) : "";
-  if (action && (from.agent || from.panel || !R.actionAllowed(action, url))) return Promise.reject(new Error("插件不做这个动作：" + action.slice(0, 40)));
+  // 网址检查（0.15.0 起）：打开的是资源首页，inspect = 要检查的网址，插件在顶部搜索框里输入它、等跳到检查页再读（只接对话页发来的）
+  var inspect = msg.inspect ? R.inspectSearchAllowed(url, msg.inspect) : "";
+  if (msg.inspect && (from.agent || from.panel || !inspect)) return Promise.reject(new Error("插件不做这个网址检查：" + String(msg.inspect).slice(0, 80)));
+  if (action && (from.agent || from.panel || !R.actionAllowed(action, url, !!inspect))) return Promise.reject(new Error("插件不做这个动作：" + action.slice(0, 40)));
   // 演示模式（0.14.0 起）：只接对话页发来的、只演谷歌搜索和站点出词；同一个演示标签页一直用、放在前台、读完不关
   var show = msg.show ? R.normShow(msg.show) : null;
   if (show && (from.agent || from.panel || !R.showAllowed(url))) return Promise.reject(new Error("插件只演示谷歌搜索和 seo.web.cafe/sitekw 两种页面"));
@@ -432,11 +441,12 @@ function startPageJob(msg, from) {
             // minMs：加载完之后至少再等这么久才算读完（GSC 这类一块一块填数据的报告页用，最多 15 秒）
             fields: { kind: "page", origin: origin, page: null, polls: 0, lastLen: -1, minMs: Math.max(0, Math.min(15000, Number(msg.minMs) || 0)), around: from.agent ? String(msg.around || "").slice(0, 100) : "",
               action: action, actionResult: null, actionAt: 0,
+              inspect: inspect, inspected: false, typedAt: 0, steps: [], searchFail: "", searchDiag: null,
               show: show, shown: false, waitFor: show ? R.showWaitFor(url) : "", keepTab: !!show, maxMs: show ? SHOW_MAX_MS : 0 },
             active: !!show, noForeground: !!show, preparedTabId: reuseTabId || undefined,
-            label: { keyword: host, range: action ? "请求编入索引" : show ? "演示" : "打开网页", geo: "" },
+            label: { keyword: inspect ? new URL(inspect).host : host, range: action ? "请求编入索引" : inspect ? "网址检查" : show ? "演示" : "打开网页", geo: "" },
             opened: show ? "演示：已在前台打开 " + host + "…" : "已在后台打开 " + host + "，等页面加载…",
-            timeoutMs: action ? ACTION_TIMEOUT_MS : show ? SHOW_TIMEOUT_MS : undefined,
+            timeoutMs: action ? ACTION_TIMEOUT_MS + (inspect ? 20000 : 0) : inspect ? INSPECT_TIMEOUT_MS : show ? SHOW_TIMEOUT_MS : undefined,
             onTimeout: function (tabId) { finishPage(tabId, true); },
           }).then(function (r) { if (show) rememberDemoTab(url); return r; });
         });
@@ -450,6 +460,7 @@ function schedulePagePoll(tabId) {
     loadJobs().then(function (jobs) {
       var job = jobs[tabId];
       if (!job || job.kind !== "page") return;
+      if (job.inspect && !job.inspected) return inspectSearchPoll(tabId, job);
       chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.extractPage, args: [R.MAX_TEXT, R.MAX_HTML, job.around || "", job.waitFor || ""] }).then(function (res) {
         var page = res && res[0] && res[0].result;
         return serial(function () {
@@ -482,6 +493,66 @@ function schedulePagePoll(tabId) {
     });
   }, PAGE_POLL_MS);
 }
+// ---------- 网址检查：在 GSC 首页搜索框里输入网址，等跳到检查页（0.15.0 起） ----------
+/** 每 1.5 秒走一步：先找搜索框填网址，再按时间表回车 / 点下拉 / 点搜索按钮，一边看跳没跳到检查页。
+ *  跳到了就当这是新打开的页面（重新计时、重新等报告加载完），之后照常读、照常点「请求编入索引」 */
+function inspectSearchPoll(tabId, job) {
+  var exec = function (step) {
+    return chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.gscInspectSearch, args: [job.inspect, step] })
+      .then(function (res) { return (res && res[0] && res[0].result) || { state: "waiting" }; }, function () { return { state: "noscript" }; });
+  };
+  var patch = function (p) {
+    return serial(function () {
+      return loadJobs().then(function (jobs) {
+        var j = jobs[tabId]; if (!j) return null;
+        Object.assign(j, p);
+        return saveJobs(jobs).then(function () { return j; });
+      });
+    });
+  };
+  // 失败：把页面结构带回去（去掉了网址和域名），交给对话页说清楚、服务器记下来
+  // 页面本身也读一遍交回去：没权限 / 没登录的首页也没有搜索框，服务器要靠页面上的字分清是哪种
+  var fail = function (why) {
+    return exec("diag").then(function (r) {
+      return chrome.scripting.executeScript({ target: { tabId: tabId }, func: R.extractPage, args: [R.MAX_TEXT, 0, "", ""] })
+        .then(function (res) { return res && res[0] && res[0].result; }, function () { return null; })
+        .then(function (page) {
+          return patch({ searchFail: why, searchDiag: r.diag || null, page: page || { finalUrl: String(r.href || job.url).slice(0, 2000), title: "", text: "", textChars: 0, headings: [], links: [], tables: [], html: "", htmlChars: 0, login: false, challenge: false, canvas: false, busy: false } });
+        });
+    }).then(function () { return finishPage(tabId, false); });
+  };
+  var since = Date.now() - (job.loadedAt || job.startedAt);
+  if (!job.typedAt) {
+    return exec("type").then(function (r) {
+      if (r.state === "inspect") return patch({ inspected: true, loadedAt: Date.now(), polls: 0, lastLen: -1, page: null }).then(function () { schedulePagePoll(tabId); });
+      if (r.state === "typed") {
+        notify(job, "reading", "在 GSC 顶部搜索框里输入要检查的网址…");
+        return patch({ typedAt: Date.now(), steps: ["type"] }).then(function () { schedulePagePoll(tabId); });
+      }
+      if (since >= INSPECT_BOX_WAIT_MS) return fail("nobox"); // 页面上找不到「检查…中的任何网址」那个搜索框
+      schedulePagePoll(tabId);
+    });
+  }
+  return exec("check").then(function (r) {
+    if (r.state === "inspect") {
+      notify(job, "reading", "GSC 打开了这个网址的检查页，等结果出来…");
+      return patch({ inspected: true, loadedAt: Date.now(), polls: 0, lastLen: -1, page: null }).then(function () { schedulePagePoll(tabId); });
+    }
+    var waited = Date.now() - job.typedAt;
+    if (waited >= INSPECT_GIVEUP_MS) return fail("stuck"); // 填了、回车了、点了，还是没跳到检查页
+    var done = job.steps || [];
+    // 每一步只做一次（记成「enter@0:entered」这样，带上结果，失败时一起带回去）
+    var tried = function (key) { return done.some(function (x) { return x.indexOf(key + ":") === 0; }); };
+    var i = -1;
+    INSPECT_STEPS.some(function (st, k) { if (waited >= st[0] && !tried(st[1] + "@" + k)) { i = k; return true; } return false; });
+    if (i < 0) { schedulePagePoll(tabId); return; }
+    var step = INSPECT_STEPS[i][1];
+    return exec(step).then(function (r2) {
+      return patch({ steps: done.concat([step + "@" + i + ":" + String(r2.state || "")]) });
+    }).then(function () { schedulePagePoll(tabId); });
+  });
+}
+
 // ---------- 演示模式（0.14.0 起） ----------
 /** 演示用的那个标签页：上一步开的还在、而且没有任务在用，就接着用它（一部电影一个窗口）；否则新开 */
 function demoTab(jobs) {
@@ -560,7 +631,9 @@ function finishPage(tabId, timedOut) {
   return loadJobs().then(function (jobs) {
     var job = jobs[tabId];
     if (!job) return;
-    if (job.page) return finish(tabId, { ok: true, data: Object.assign({ kind: "page", url: job.url }, job.page, job.action ? { action: job.action, actionResult: job.actionResult || { state: timedOut ? "timeout" : "notrun", text: "" } } : {}) }, !!(job.page.login || job.page.challenge));
+    // 网址检查（0.15.0）：告诉对话页搜索那一步成没成；没成的带回页面结构（服务器记下来，GSC 再改版时一眼看出改了什么）
+    var search = job.inspect ? { inspectSearch: job.inspected ? { state: "ok" } : { state: job.searchFail || (timedOut ? "timeout" : "stuck"), steps: job.steps || [], diag: job.searchDiag || null } } : {};
+    if (job.page) return finish(tabId, { ok: true, data: Object.assign({ kind: "page", url: job.url }, job.page, search, job.action ? { action: job.action, actionResult: job.actionResult || { state: timedOut ? "timeout" : "notrun", text: "" } } : {}) }, !!(job.page.login || job.page.challenge || (job.inspect && !job.inspected)));
     return finish(tabId, { ok: false, error: (timedOut ? (JOB_TIMEOUT_MS / 1000) + " 秒内" : "") + "页面没加载出来——已把那个标签页切到前台，看一眼就知道" }, true);
   });
 }

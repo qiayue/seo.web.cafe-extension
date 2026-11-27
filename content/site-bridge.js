@@ -52,6 +52,8 @@
         minMs: kind === "page" ? Number(d.minMs) || 0 : undefined,
         // action（0.13.0 起）：只有 "gsc_request_indexing"，后台还会按网址再核一遍
         action: kind === "page" && d.action ? String(d.action).slice(0, 40) : undefined,
+        // inspect（0.15.0 起）：GSC 网址检查——url 是资源首页，inspect 是要检查的网址，后台在顶部搜索框里输入它
+        inspect: kind === "page" && d.inspect ? String(d.inspect).slice(0, 2000) : undefined,
         // show（0.14.0 起）：演示模式（字幕 / 第几幕 / 停留多久），后台还会按网址再核一遍
         show: kind === "page" && d.show && typeof d.show === "object" ? { caption: String(d.show.caption || "").slice(0, 160), title: String(d.show.title || "").slice(0, 30), step: Number(d.show.step) || 1, total: Number(d.show.total) || 0, holdMs: Number(d.show.holdMs) || 0 } : undefined }, function (res) {
         if (chrome.runtime.lastError) {
