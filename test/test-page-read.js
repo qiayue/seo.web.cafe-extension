@@ -38,6 +38,7 @@ check("点按钮的函数能单独序列化进网页执行，只点文字正好�
   const clicked = [];
   const mk = (t, w = 10) => ({ innerText: t, getBoundingClientRect: () => ({ width: w, height: 10 }), getAttribute: () => null, click: () => clicked.push(t) });
   const buttons = [mk("TEST LIVE URL"), mk("REQUEST INDEXING", 0), mk("Request indexing"), mk("Request indexing for all pages on this site and more")];
+  global.location = { href: "https://search.google.com/search-console/inspect?resource_id=sc-domain%3Aa.com&id=MHAW2DoyMyxKowWd72skNA" };
   global.document = { body: { innerText: "URL is on Google" }, querySelectorAll: () => buttons };
   assert.deepEqual(R.gscIndexAction("click"), { state: "clicked" });
   assert.deepEqual(clicked, ["Request indexing"], "看不见的、文字不完全一样的都不点");
@@ -49,7 +50,31 @@ check("点按钮的函数能单独序列化进网页执行，只点文字正好�
   assert.equal(R.gscIndexAction("check").state, "testing");
   global.document = { body: { innerText: "URL is not on Google" }, querySelectorAll: () => [] };
   assert.equal(R.gscIndexAction("click").state, "nobutton");
-  delete global.document;
+  // 先搜索再检查（0.15.0）：标签页还停在首页（没跳到检查页）时绝不动手
+  global.location = { href: "https://search.google.com/search-console?resource_id=sc-domain%3Aa.com" };
+  global.document = { body: { innerText: "URL is on Google" }, querySelectorAll: () => buttons };
+  clicked.length = 0;
+  assert.equal(R.gscIndexAction("click").state, "wrongpage");
+  assert.deepEqual(clicked, []);
+  delete global.document; delete global.location;
+});
+check("网址检查（0.15.0）：只认 GSC 资源首页 + http(s) 网址；请求编入索引走这条路时也只认首页", () => {
+  const home = "https://search.google.com/search-console?resource_id=sc-domain%3Aaisong.org";
+  assert.equal(R.inspectSearchAllowed(home, " https://aisong.org/pricing/ "), "https://aisong.org/pricing/");
+  assert.equal(R.inspectSearchAllowed(home + "&authuser=a%40b.com", "http://aisong.org/"), "http://aisong.org/");
+  assert.equal(R.inspectSearchAllowed("https://search.google.com/search-console/?resource_id=x", "https://a.com/"), "https://a.com/");
+  for (const [u, t] of [[home, "javascript:alert(1)"], [home, "aisong.org"], [home, "https://user:pw@a.com/"], [home, ""],
+    ["https://search.google.com/search-console/index?resource_id=x", "https://a.com/"], ["https://evil.com/search-console?resource_id=x", "https://a.com/"], ["https://search.google.com/search-console", "https://a.com/"]])
+    assert.equal(R.inspectSearchAllowed(u, t), "", u + " " + t);
+  assert.equal(R.actionAllowed("gsc_request_indexing", home, true), true);
+  assert.equal(R.actionAllowed("gsc_request_indexing", "https://search.google.com/search-console/index?resource_id=x", true), false);
+  assert.equal(R.actionAllowed("click", home, true), false);
+  assert.equal(R.actionAllowed("gsc_request_indexing", home), false, "不走搜索时首页不能点");
+});
+check("搜索框那几步的函数能单独序列化进网页执行", () => {
+  const src = R.gscInspectSearch.toString();
+  assert.ok(!/\bR\.|\bGSC_HOME_RE\b|\bGSC_INSPECT_RE\b|\bnormPageUrl\b/.test(src));
+  assert.equal(R.gscInspectSearch.length, 2);
 });
 check("演示模式只演谷歌搜索和站点出词两种页面", () => {
   for (const u of ["https://www.google.com/search?q=oc+maker&hl=en", "https://www.google.co.uk/search?q=x", "https://seo.web.cafe/sitekw/?d=carrd.co", "https://seo.web.cafe/sitekw/"]) assert.equal(R.showAllowed(u), true, u);

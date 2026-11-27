@@ -94,6 +94,9 @@ const chatPage = `<!doctype html><title>chat (mock)</title><script>
   window.__page = function (id, url, minMs) {
     window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'page', requestId: id, url: url, minMs: minMs || 0 }, location.origin);
   };
+  window.__inspect = function (id, url, inspect, action) {
+    window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'page', requestId: id, url: url, inspect: inspect, action: action || undefined, minMs: 0 }, location.origin);
+  };
   window.__ahrefs = function (id, target) {
     window.postMessage({ source: 'gefei-seo-page', type: 'trends:fetch', kind: 'ahrefs', requestId: id, target: target }, location.origin);
   };
@@ -135,6 +138,38 @@ const busyPage = `<!doctype html><meta charset="utf-8"><title>Report</title><mai
 const latePage = `<!doctype html><meta charset="utf-8"><title>Late</title><main><p id="t">概览</p></main><script>
   setTimeout(function () { document.getElementById('t').textContent = '概览 点击 1,234 曝光 56,789'; }, 3500);
 </script>`;
+
+// 假的 GSC（0.15.0 网址检查）：首页顶部的搜索框照哥飞 2026-11-27 在自己 GSC 里量到的样子搭——
+// 外层 data-placeholder、input[role=combobox] 带 aria-label「检查 xxx 中的任何网址」，旁边还有一个只读的资源选择框（不能填错地方）。
+// 像真的一样只听 input / keydown（keyCode 13）：回车后用 pushState 跳到 /search-console/inspect?resource_id=…&id=<随机串>，画出检查结果。
+// resource_id 里带 stuck 的：搜索框不理人（测「填了也不跳」）；带 nobox 的：页面上没有搜索框
+const gscHome = (rid) => `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Search Console</title><body>
+<header>
+  <div jsname="h0T7hb"><div class="d1dlne" data-placeholder="检查“${rid}”中的任何网址">
+    <input class="yNVtPc" disabled="true" aria-hidden="true">
+    ${/nobox/.test(rid) ? "" : `<input id="q" class="Ax4B8" type="text" aria-label="检查 ${rid} 中的任何网址" role="combobox" aria-controls="lb">`}
+  </div><div role="listbox" id="lb"></div></div>
+  <div><input type="text" role="combobox" aria-label="${rid}" readonly="true" value="${rid}"><div>搜索资源</div></div>
+</header>
+<main id="m"><h1>概览</h1><p>效果 点击 12 曝光 345</p></main>
+<script>
+  var q = document.getElementById('q'), typed = '';
+  if (q && !/stuck/.test(${JSON.stringify(rid)})) {
+    q.addEventListener('input', function () { typed = q.value; });
+    q.addEventListener('keydown', function (e) {
+      if (e.keyCode !== 13 || !typed) return;
+      history.pushState({}, '', '/search-console/inspect?resource_id=' + encodeURIComponent(${JSON.stringify(rid)}) + '&id=TOK' + Math.random().toString(36).slice(2, 10));
+      document.getElementById('m').innerHTML = '<h1>网址检查</h1><p>' + typed + '</p><div role="progressbar" id="pb" style="width:100px;height:4px;background:#999"></div>';
+      setTimeout(function () {
+        document.getElementById('pb').remove();
+        document.getElementById('m').insertAdjacentHTML('beforeend', '<p>网页索引编制 网页已编入索引</p><div role="button" id="ri" style="display:inline-block;padding:4px">请求编入索引</div>');
+        document.getElementById('ri').addEventListener('click', function () {
+          setTimeout(function () { document.getElementById('m').insertAdjacentHTML('beforeend', '<p>已请求编入索引 网址已添加到优先抓取队列</p>'); }, 800);
+        });
+      }, 1200);
+    });
+  }
+</script></body></html>`;
 
 // 本机假站：按 Host 分发。证书现生成（自签，浏览器那边用 --ignore-certificate-errors 放行），不进仓库
 function makeCert(dir) {
@@ -190,6 +225,10 @@ function handle(req, res) {
     return send(404, "text/plain", "");
   }
   if (host === "other.example") return send(200, "text/html", "<title>Other</title><main>other site</main>");
+  if (host === "search.google.com") {
+    if (u.pathname === "/search-console" || u.pathname === "/search-console/") return send(200, "text/html; charset=utf-8", gscHome(u.searchParams.get("resource_id") || ""));
+    return send(404, "text/html; charset=utf-8", "<title>Error 404</title>404. 出现了错误。在此服务器上找不到请求的网址。");
+  }
   if (host === "seo.web.cafe" || host === "evil.example") {
     if (u.pathname === "/extension/version.json") return send(200, "application/json", JSON.stringify({ version: MANIFEST.version }));
     return send(200, "text/html", chatPage);
@@ -197,7 +236,7 @@ function handle(req, res) {
   send(404, "text/plain", "");
 }
 
-const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.example", "app.ahrefs.com", "ahrefs.3ue.com", "shop.example", "js.example", "other.example"];
+const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.example", "app.ahrefs.com", "ahrefs.3ue.com", "shop.example", "js.example", "other.example", "search.google.com"];
 
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gefei-ext-"));
@@ -543,6 +582,7 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
     delete mf.optional_permissions;
     mf.host_permissions.push("https://app.ahrefs.com/*", "https://ahrefs.3ue.com/*"); // 等于在侧边栏点过「允许读 Ahrefs 数据」
     mf.host_permissions.push("https://js.example/*"); // 等于在「允许」页面点过允许打开 js.example
+    mf.host_permissions.push("https://search.google.com/*"); // 等于允许过读 GSC
     fs.writeFileSync(path.join(extCopy, "manifest.json"), JSON.stringify(mf));
     const ctx2 = await playwright.chromium.launchPersistentContext(path.join(tmp, "profile2"), {
       channel: "chromium", ignoreHTTPSErrors: true,
@@ -651,6 +691,35 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       check("不等：文字稳住一阵就当读完（读到的还是旧的）；等 4 秒：读到后来填进去的数字", pl0 && pl0.ok && !/1,234/.test(pl0.data.text) && pl && pl.ok && /点击 1,234 曝光 56,789/.test(pl.data.text),
         (pl0 && pl0.data && pl0.data.text) + " | " + (pl && pl.data && pl.data.text));
       for (const p of pageTabs()) await p.close();
+
+      // ⑬ GSC 网址检查（0.15.0）：GSC 不认「网址直接拼进检查页链接」了，插件打开资源首页、在顶部搜索框里输入网址回车，等跳到检查页再读
+      const inspect = async (id, rid, target, action, wait) => {
+        await chat2.evaluate(([i, u, t, a]) => window.__inspect(i, u, t, a), [id, "https://search.google.com/search-console?resource_id=" + encodeURIComponent(rid), target, action || ""]);
+        await chat2.waitForFunction((i) => window.__results[i], id, { timeout: wait || 60000 }).catch(() => {});
+        return chat2.evaluate((i) => window.__results[i] || null, id);
+      };
+      const gscTabs = () => ctx2.pages().filter((p) => /search\.google\.com/.test(p.url()));
+      const gi = await inspect("b1".repeat(16), "sc-domain:aisong.org", "https://aisong.org/pricing/");
+      check("网址检查：在首页搜索框里输入网址、回车，跳到 GSC 生成的检查页（id 是随机串不是网址）再读，读到检查结果",
+        gi && gi.ok && gi.data.inspectSearch && gi.data.inspectSearch.state === "ok" && /\/search-console\/inspect\?resource_id=sc-domain%3Aaisong\.org&id=TOK/.test(gi.data.finalUrl)
+          && /网页已编入索引/.test(gi.data.text) && /aisong\.org\/pricing/.test(gi.data.text), gi && (gi.error || JSON.stringify(gi.data.inspectSearch) + " " + gi.data.finalUrl));
+      await new Promise((r) => setTimeout(r, 400));
+      check("网址检查读完关掉那个标签页", gscTabs().length === 0, gscTabs().map((p) => p.url()).join());
+      const gr = await inspect("b2".repeat(16), "sc-domain:aisong.org", "https://aisong.org/new/", "gsc_request_indexing", 90000);
+      check("请求编入索引：搜到检查页之后再点「请求编入索引」，等到「已请求」", gr && gr.ok && gr.data.inspectSearch.state === "ok" && gr.data.actionResult && gr.data.actionResult.state === "requested",
+        gr && (gr.error || JSON.stringify(gr.data.actionResult)));
+      const gs = await inspect("b3".repeat(16), "sc-domain:stuck.example", "https://stuck.example/a/", "", 90000);
+      const sd = gs && gs.data && gs.data.inspectSearch;
+      check("填了、回车了、点了还是不跳：25 秒后交回失败，每一步做了什么都记着，带回页面结构（找到了搜索框）",
+        gs && gs.ok && sd && sd.state === "stuck" && sd.steps.some((x) => /^enter@0:/.test(x)) && sd.steps.some((x) => /^option@1:/.test(x)) && sd.diag && sd.diag.box === true && /combobox/.test(sd.diag.inputs.join()),
+        gs && (gs.error || JSON.stringify(sd).slice(0, 300)));
+      check("带回的页面结构去掉了用户的域名和网址", sd && !/stuck\.example/.test(JSON.stringify(sd.diag)), sd && JSON.stringify(sd.diag).slice(0, 200));
+      const gn = await inspect("b4".repeat(16), "sc-domain:nobox.example", "https://nobox.example/", "", 90000);
+      check("页面上找不到搜索框：20 秒后交回 nobox 和页面结构", gn && gn.ok && gn.data.inspectSearch && gn.data.inspectSearch.state === "nobox" && gn.data.inspectSearch.diag && gn.data.inspectSearch.diag.box === false,
+        gn && (gn.error || JSON.stringify(gn.data.inspectSearch).slice(0, 200)));
+      const bad = await inspect("b5".repeat(16), "sc-domain:aisong.org", "javascript:alert(1)");
+      check("要检查的不是 http(s) 网址：插件不做", bad && bad.ok === false && /不做这个网址检查/.test(bad.error), bad && bad.error);
+      for (const p of gscTabs()) await p.close();
 
       // 侧边栏调试：用浏览器读上面这个网址，显示读到了什么（发样本给开发者就靠它）
       await panel2.fill("#pageUrl", "https://js.example/app");
