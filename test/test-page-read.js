@@ -71,6 +71,22 @@ check("网址检查（0.15.0）：只认 GSC 资源首页 + http(s) 网址；请
   assert.equal(R.actionAllowed("click", home, true), false);
   assert.equal(R.actionAllowed("gsc_request_indexing", home), false, "不走搜索时首页不能点");
 });
+check("多账号（0.15.1）：浏览器里登了几个 Google 账号时 GSC 地址带 /u/N/（第 2 个账号是 /u/1/）——首页、检查页、点按钮都认", () => {
+  const home1 = "https://search.google.com/u/1/search-console?resource_id=sc-domain%3Aaisong.org";
+  assert.equal(R.inspectSearchAllowed(home1, "https://aisong.org/a"), "https://aisong.org/a");
+  assert.equal(R.inspectSearchAllowed("https://search.google.com/u/0/search-console/?resource_id=x", "https://a.com/"), "https://a.com/");
+  assert.equal(R.actionAllowed("gsc_request_indexing", home1, true), true);
+  assert.equal(R.actionAllowed("gsc_request_indexing", "https://search.google.com/u/1/search-console/inspect?resource_id=x&id=Ab12"), true);
+  for (const u of ["https://search.google.com/u/x/search-console?resource_id=x", "https://search.google.com/u/123/search-console?resource_id=x", "https://search.google.com/u/1/search-console/index?resource_id=x", "https://evil.com/u/1/search-console?resource_id=x"])
+    assert.equal(R.inspectSearchAllowed(u, "https://a.com/"), "", u);
+  const buttons = [{ innerText: "Request indexing", getBoundingClientRect: () => ({ width: 10, height: 10 }), getAttribute: () => null, click() {} }];
+  global.location = { href: "https://search.google.com/u/1/search-console/inspect?resource_id=sc-domain%3Aa.com&id=MHAW2DoyMyxKowWd72skNA" };
+  global.document = { body: { innerText: "URL is on Google" }, querySelectorAll: () => buttons };
+  assert.deepEqual(R.gscIndexAction("click"), { state: "clicked" }, "/u/1/ 的检查页上照样点");
+  global.location = { href: "https://search.google.com/u/1/search-console?resource_id=sc-domain%3Aa.com" };
+  assert.equal(R.gscIndexAction("click").state, "wrongpage", "还停在 /u/1/ 首页时不动手");
+  delete global.document; delete global.location;
+});
 check("搜索框那几步的函数能单独序列化进网页执行", () => {
   const src = R.gscInspectSearch.toString();
   assert.ok(!/\bR\.|\bGSC_HOME_RE\b|\bGSC_INSPECT_RE\b|\bnormPageUrl\b/.test(src));

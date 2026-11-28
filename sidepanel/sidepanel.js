@@ -283,7 +283,7 @@
     pagePending = { id: newId() };
     pagePending.timer = setTimeout(function () { pageDone({ requestId: pagePending && pagePending.id, ok: false, error: "3 分钟没等到插件后台的回音" }); }, 180000);
     pageShow("正在后台打开 " + t.url + " 读页面……");
-    var minMs = /^https:\/\/search\.google\.com\/search-console/.test(t.url) ? 4000 : 0; // GSC 的报告是一块一块填进来的，多等一会儿
+    var minMs = /^https:\/\/search\.google\.com\/(?:u\/\d{1,2}\/)?search-console/.test(t.url) ? 4000 : 0; // GSC 的报告是一块一块填进来的，多等一会儿
     chrome.windows.getCurrent().then(function (win) {
       return chrome.runtime.sendMessage({ type: "trends:fetch", kind: "page", requestId: pagePending.id, url: t.url, minMs: minMs, windowId: win && win.id });
     }).then(function (r) {
