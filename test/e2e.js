@@ -143,7 +143,8 @@ const latePage = `<!doctype html><meta charset="utf-8"><title>Late</title><main>
 // 外层 data-placeholder、input[role=combobox] 带 aria-label「检查 xxx 中的任何网址」，旁边还有一个只读的资源选择框（不能填错地方）。
 // 像真的一样只听 input / keydown（keyCode 13）：回车后用 pushState 跳到 /search-console/inspect?resource_id=…&id=<随机串>，画出检查结果。
 // resource_id 里带 stuck 的：搜索框不理人（测「填了也不跳」）；带 nobox 的：页面上没有搜索框
-const gscHome = (rid) => `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Search Console</title><body>
+// prefix：浏览器里登了好几个 Google 账号时地址带的 /u/N（0.15.1），检查页也跳到同一个 /u/N 下
+const gscHome = (rid, prefix = "") => `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Search Console</title><body>
 <header>
   <div jsname="h0T7hb"><div class="d1dlne" data-placeholder="检查“${rid}”中的任何网址">
     <input class="yNVtPc" disabled="true" aria-hidden="true">
@@ -158,7 +159,7 @@ const gscHome = (rid) => `<!doctype html><html lang="zh-CN"><meta charset="utf-8
     q.addEventListener('input', function () { typed = q.value; });
     q.addEventListener('keydown', function (e) {
       if (e.keyCode !== 13 || !typed) return;
-      history.pushState({}, '', '/search-console/inspect?resource_id=' + encodeURIComponent(${JSON.stringify(rid)}) + '&id=TOK' + Math.random().toString(36).slice(2, 10));
+      history.pushState({}, '', '${prefix}/search-console/inspect?resource_id=' + encodeURIComponent(${JSON.stringify(rid)}) + '&id=TOK' + Math.random().toString(36).slice(2, 10));
       document.getElementById('m').innerHTML = '<h1>网址检查</h1><p>' + typed + '</p><div role="progressbar" id="pb" style="width:100px;height:4px;background:#999"></div>';
       setTimeout(function () {
         document.getElementById('pb').remove();
@@ -226,7 +227,8 @@ function handle(req, res) {
   }
   if (host === "other.example") return send(200, "text/html", "<title>Other</title><main>other site</main>");
   if (host === "search.google.com") {
-    if (u.pathname === "/search-console" || u.pathname === "/search-console/") return send(200, "text/html; charset=utf-8", gscHome(u.searchParams.get("resource_id") || ""));
+    const home = u.pathname.match(/^(\/u\/\d+)?\/search-console\/?$/);
+    if (home) return send(200, "text/html; charset=utf-8", gscHome(u.searchParams.get("resource_id") || "", home[1] || ""));
     return send(404, "text/html; charset=utf-8", "<title>Error 404</title>404. 出现了错误。在此服务器上找不到请求的网址。");
   }
   if (host === "seo.web.cafe" || host === "evil.example") {
@@ -693,8 +695,9 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       for (const p of pageTabs()) await p.close();
 
       // ⑬ GSC 网址检查（0.15.0）：GSC 不认「网址直接拼进检查页链接」了，插件打开资源首页、在顶部搜索框里输入网址回车，等跳到检查页再读
-      const inspect = async (id, rid, target, action, wait) => {
-        await chat2.evaluate(([i, u, t, a]) => window.__inspect(i, u, t, a), [id, "https://search.google.com/search-console?resource_id=" + encodeURIComponent(rid), target, action || ""]);
+      const inspect = async (id, rid, target, action, wait, slot) => {
+        const home = "https://search.google.com/" + (slot == null ? "" : "u/" + slot + "/") + "search-console?resource_id=" + encodeURIComponent(rid);
+        await chat2.evaluate(([i, u, t, a]) => window.__inspect(i, u, t, a), [id, home, target, action || ""]);
         await chat2.waitForFunction((i) => window.__results[i], id, { timeout: wait || 60000 }).catch(() => {});
         return chat2.evaluate((i) => window.__results[i] || null, id);
       };
@@ -708,6 +711,10 @@ const HOSTS = ["trends.google.com", "www.google.com", "seo.web.cafe", "evil.exam
       const gr = await inspect("b2".repeat(16), "sc-domain:aisong.org", "https://aisong.org/new/", "gsc_request_indexing", 90000);
       check("请求编入索引：搜到检查页之后再点「请求编入索引」，等到「已请求」", gr && gr.ok && gr.data.inspectSearch.state === "ok" && gr.data.actionResult && gr.data.actionResult.state === "requested",
         gr && (gr.error || JSON.stringify(gr.data.actionResult)));
+      const gu = await inspect("b6".repeat(16), "sc-domain:aisong.org", "https://aisong.org/new/", "gsc_request_indexing", 90000, 1);
+      check("多账号（0.15.1）：GSC 在第 2 个账号下（/u/1/）——首页搜索框照样能填，跳到 /u/1/ 的检查页再点「请求编入索引」",
+        gu && gu.ok && gu.data.inspectSearch.state === "ok" && /^https:\/\/search\.google\.com\/u\/1\/search-console\/inspect\?/.test(gu.data.finalUrl)
+          && gu.data.actionResult && gu.data.actionResult.state === "requested", gu && (gu.error || gu.data.finalUrl + " " + JSON.stringify(gu.data.actionResult)));
       const gs = await inspect("b3".repeat(16), "sc-domain:stuck.example", "https://stuck.example/a/", "", 90000);
       const sd = gs && gs.data && gs.data.inspectSearch;
       check("填了、回车了、点了还是不跳：25 秒后交回失败，每一步做了什么都记着，带回页面结构（找到了搜索框）",
